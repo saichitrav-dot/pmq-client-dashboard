@@ -4,10 +4,13 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from modules import task5_correlation_plus
-
-
-REPORT_PATH = task5_correlation_plus.PUBLISHED_REPORT_PATH
+REPORT_PATH = Path(__file__).resolve().parents[1] / "published_reports" / "pmq_client_dashboard.xlsx"
+QUADRANT_COLORS = {
+    "Deployable Candidates": "#10b981",
+    "Progressing Candidates": "#7c3aed",
+    "Basic Competency": "#0ea5e9",
+    "Critical Intervention": "#ef4444",
+}
 
 
 def _load_sheet(path: Path, sheet_name: str) -> pd.DataFrame:
@@ -276,7 +279,7 @@ def run() -> None:
             x="Overall Performance Score",
             y="Performance Score",
             color="Quadrant",
-            color_discrete_map=task5_correlation_plus.QUADRANT_COLORS,
+            color_discrete_map=QUADRANT_COLORS,
             hover_data={
                 "Superset ID": True,
                 "Candidate Name": True,
