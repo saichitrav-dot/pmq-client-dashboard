@@ -25,7 +25,7 @@ import pandas as pd
 import plotly.express as px
 import requests
 import streamlit as st
-from modules import task2_assessment, task3_attendance, task4_correlation, task5_correlation_plus, task6_top_brains, task7_student_360, task8_client_pmq_dashboard
+from modules import task2_assessment, task3_attendance, task4_correlation, task5_correlation_plus, task6_top_brains, task7_student_360
 
 try:
     from pylint.lint import Run as PylintRun
@@ -279,7 +279,6 @@ PORTAL_MODULES = [
     "Assessment & Feedback Analytics",
     "Executive Attendance Intelligence",
     "Performance Magic Quadrant Plus",
-    "Client PMQ Dashboard",
 ]
 
 
@@ -4787,14 +4786,6 @@ def reset_task7_state() -> None:
         st.session_state.pop(key, None)
 
 
-def reset_task8_state() -> None:
-    for key in [
-        "task8_bucket_filter",
-        "task8_search_text",
-    ]:
-        st.session_state.pop(key, None)
-
-
 def reset_current_module_state(selected_module: str) -> None:
     if selected_module == "GitHub Evaluation Engine":
         reset_task1_state(clear_inputs=True)
@@ -4806,8 +4797,6 @@ def reset_current_module_state(selected_module: str) -> None:
         reset_task6_state()
     elif selected_module == "Performance Magic Quadrant":
         reset_task4_state()
-    elif selected_module == "Client PMQ Dashboard":
-        reset_task8_state()
     else:
         reset_task5_state()
 
@@ -4820,11 +4809,10 @@ def reset_all_portal_state() -> None:
     reset_task5_state()
     reset_task6_state()
     reset_task7_state()
-    reset_task8_state()
 
 
 def render_portal_reset_toolbar(selected_module: str) -> None:
-    current_label = "Reset Current View" if selected_module in {"Performance Magic Quadrant", "Performance Magic Quadrant Plus", "Client PMQ Dashboard"} else "Reset Current Module"
+    current_label = "Reset Current View" if selected_module in {"Performance Magic Quadrant", "Performance Magic Quadrant Plus"} else "Reset Current Module"
     with st.container(border=True):
         info_col, current_col, all_col = st.columns([1.8, 0.9, 1.0])
         with info_col:
@@ -5979,8 +5967,6 @@ def generate_dashboard() -> None:
         task3_attendance.run()
     elif selected_module == "Top Brains Performance":
         task6_top_brains.run()
-    elif selected_module == "Client PMQ Dashboard":
-        task8_client_pmq_dashboard.run()
     elif selected_module == "Performance Magic Quadrant":
         task4_correlation.run()
     else:
