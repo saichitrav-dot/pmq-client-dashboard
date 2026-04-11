@@ -13,17 +13,31 @@ QUADRANT_ORDER = [
     "Critical Intervention",
 ]
 QUADRANT_COLORS = {
-    "Deployable Candidates": "#0f9d58",
-    "Progressing Candidates": "#c48a12",
-    "Basic Competency": "#1d4ed8",
-    "Critical Intervention": "#d93025",
+    "Deployable Candidates": "#12b981",
+    "Progressing Candidates": "#d4a017",
+    "Basic Competency": "#3b82f6",
+    "Critical Intervention": "#ef4444",
 }
 QUADRANT_DESCRIPTIONS = {
-    "Deployable Candidates": "A and A+ performance-grade students ready for deployment conversations.",
-    "Progressing Candidates": "B-grade students building momentum and moving toward deployable readiness.",
-    "Basic Competency": "C-grade students who have crossed the baseline but still need guided uplift.",
-    "Critical Intervention": "F-grade students requiring immediate management attention and structured intervention.",
+    "Deployable Candidates": "Students already in the A or A+ performance band and ready for deployment conversations.",
+    "Progressing Candidates": "Students in the B band who are moving well but still need performance uplift to enter the top bucket.",
+    "Basic Competency": "Students in the C band who have crossed the baseline and need structured technical improvement.",
+    "Critical Intervention": "Students in the F band who require immediate academic and management follow-up.",
 }
+GRADE_ORDER = ["A+", "A", "B", "C", "F"]
+TRACKER_COLUMNS = [
+    "Assessment Composite Score",
+    "Assignment GitHub Score",
+    "Performance Score",
+    "Overall Performance Score",
+    "Attendance %",
+    "Trainer Feedback Score",
+    "Assessment GitHub Score",
+    "Top Brains Score",
+    "Assessment GitHub Weeks",
+    "Assignment GitHub Weeks",
+    "Top Brains Weeks",
+]
 
 
 def _load_sheet(path: Path, sheet_name: str) -> pd.DataFrame:
@@ -33,10 +47,12 @@ def _load_sheet(path: Path, sheet_name: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def load_dashboard_payload(path: Path) -> dict:
+def _load_payload(path: Path) -> dict:
     return {
+        "dashboard": _load_sheet(path, "dashboard_summary"),
         "summary": _load_sheet(path, "summary_data"),
         "counts": _load_sheet(path, "quadrant_counts"),
+        "integrity": _load_sheet(path, "signal_integrity"),
         "insights": _load_sheet(path, "executive_insights"),
         "candidate_map": _load_sheet(path, "metric_candidate_map"),
         "plot": _load_sheet(path, "quadrant_plot_data"),
@@ -44,8 +60,8 @@ def load_dashboard_payload(path: Path) -> dict:
     }
 
 
-def summary_lookup(summary_df: pd.DataFrame) -> dict:
-    if summary_df.empty or "Metric" not in summary_df.columns or "Value" not in summary_df.columns:
+def _summary_lookup(summary_df: pd.DataFrame) -> dict:
+    if summary_df.empty or {"Metric", "Value"} - set(summary_df.columns):
         return {}
     return {
         str(row["Metric"]).strip(): row["Value"]
@@ -54,96 +70,103 @@ def summary_lookup(summary_df: pd.DataFrame) -> dict:
     }
 
 
-def render_count_card(title: str, value: int, subtitle: str, accent: str) -> None:
-    st.markdown(
-        f"""
-        <div class="client-pmq-card" style="--card-accent:{accent};">
-            <div class="client-pmq-card-title">{title}</div>
-            <div class="client-pmq-card-value">{value}</div>
-            <div class="client-pmq-card-subtitle">{subtitle}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+def _format_value(value: object, digits: int = 1) -> str:
+    if pd.isna(value):
+        return "N/A"
+    if isinstance(value, str):
+        return value
+    value = float(value)
+    if value.is_integer():
+        return str(int(value))
+    return f"{value:.{digits}f}"
 
 
-def render_signal_card(title: str, value: str, subtitle: str) -> None:
-    st.markdown(
-        f"""
-        <div class="client-pmq-signal-card">
-            <div class="client-pmq-signal-title">{title}</div>
-            <div class="client-pmq-signal-value">{value}</div>
-            <div class="client-pmq-signal-subtitle">{subtitle}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+def _coerce_numeric(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    result = df.copy()
+    for column in columns:
+        if column in result.columns:
+            result[column] = pd.to_numeric(result[column], errors="coerce")
+    return result
 
 
-def build_dynamic_insights(filtered_df: pd.DataFrame) -> list[dict]:
+def _filter_frame(df: pd.DataFrame, college: str, batch: str, quadrant: str, search_text: str) -> pd.DataFrame:
+    filtered_df = df.copy()
+    if "College" in filtered_df.columns and college != "All Colleges":
+        filtered_df = filtered_df[filtered_df["College"].astype(str) == college].copy()
+    if "Assigned Batch" in filtered_df.columns and batch != "All Batches":
+        filtered_df = filtered_df[filtered_df["Assigned Batch"].astype(str) == batch].copy()
+    if "Quadrant" in filtered_df.columns and quadrant != "All Buckets":
+        filtered_df = filtered_df[filtered_df["Quadrant"].astype(str) == quadrant].copy()
+    if search_text:
+        needle = search_text.strip().lower()
+        name_match = filtered_df.get("Candidate Name", pd.Series(index=filtered_df.index, dtype="object")).astype(str).str.lower().str.contains(needle, na=False)
+        id_match = filtered_df.get("Superset ID", pd.Series(index=filtered_df.index, dtype="object")).astype(str).str.lower().str.contains(needle, na=False)
+        filtered_df = filtered_df[name_match | id_match].copy()
+    return filtered_df
+
+
+def _build_dynamic_insights(filtered_df: pd.DataFrame) -> list[dict]:
     if filtered_df.empty:
         return []
 
-    total = len(filtered_df)
     counts = filtered_df["Quadrant"].value_counts()
-    avg_performance = pd.to_numeric(filtered_df["Performance Score"], errors="coerce").mean()
-    avg_overall = pd.to_numeric(filtered_df["Overall Performance Score"], errors="coerce").mean()
-    avg_assignment = pd.to_numeric(filtered_df["Assignment GitHub Score"], errors="coerce").mean()
-    avg_assessment = pd.to_numeric(filtered_df["Assessment Composite Score"], errors="coerce").mean()
+    total = len(filtered_df)
     deployable_share = counts.get("Deployable Candidates", 0) / total
     progressing_share = counts.get("Progressing Candidates", 0) / total
-    critical_share = counts.get("Critical Intervention", 0) / total
+    basic_share = counts.get("Basic Competency", 0) / total
+    avg_perf = filtered_df["Performance Score"].mean()
+    avg_overall = filtered_df["Overall Performance Score"].mean()
+    avg_assessment = filtered_df["Assessment Composite Score"].mean()
+    avg_assignment = filtered_df["Assignment GitHub Score"].mean()
+    avg_attendance = filtered_df["Attendance %"].mean()
 
     insights = [
         {
-            "headline": f"{deployable_share:.0%} of the current cohort is in the deployable band.",
-            "detail": "These students are currently clearing the strongest performance bucket and should anchor leadership-ready deployment discussions.",
+            "headline": f"{deployable_share:.0%} of the current view is in the deployable band.",
+            "detail": "This is the strongest talent segment in the current selection and is the most ready for immediate business conversations.",
         },
         {
-            "headline": f"Average performance score is {avg_performance:.1f}.",
-            "detail": "This is the bucket-driving score, built from assessment composite and assignment GitHub performance.",
+            "headline": f"Average performance score is {avg_perf:.1f}, while overall score stands at {avg_overall:.1f}.",
+            "detail": "Performance score drives the bucket, while overall score reflects the full weighted model after attendance and trainer feedback are added.",
         },
         {
-            "headline": f"Average assessment composite is {avg_assessment:.1f} and average assignment score is {avg_assignment:.1f}.",
-            "detail": "This split helps leadership see whether the cohort is stronger on structured assessments or on assignment execution.",
+            "headline": f"Assessment composite averages {avg_assessment:.1f} and assignment GitHub averages {avg_assignment:.1f}.",
+            "detail": "This comparison shows whether the cohort is stronger in structured assessments or in delivery-oriented assignment execution.",
         },
     ]
 
-    if critical_share > 0:
+    if avg_assignment + 5 < avg_assessment:
         insights.append(
             {
-                "headline": f"{critical_share:.0%} of the cohort is in critical intervention.",
-                "detail": "This group should move into the highest-priority review track with direct academic and management follow-up.",
+                "headline": "Assignments are trailing the structured assessment signal.",
+                "detail": "The cohort is performing better in composite assessments than in assignment execution, which suggests a delivery-conversion gap.",
+            }
+        )
+    elif avg_assignment > avg_assessment + 5:
+        insights.append(
+            {
+                "headline": "Assignment execution is outperforming the assessment composite.",
+                "detail": "Students are delivering well on assignment work, which may indicate strong execution despite lower assessment consistency.",
             }
         )
     else:
         insights.append(
             {
-                "headline": f"{progressing_share:.0%} of the cohort is in the progressing band, with average overall score at {avg_overall:.1f}.",
-                "detail": "This segment has the strongest near-term movement opportunity into the deployable band with targeted coaching.",
+                "headline": f"{progressing_share:.0%} of the view sits in the progressing band and {basic_share:.0%} in the baseline band.",
+                "detail": "This is the near-term movement pool for focused mentoring, targeted reviews, and transition into the deployable category.",
             }
         )
+
+    insights.append(
+        {
+            "headline": f"Average attendance is {avg_attendance:.1f}%.",
+            "detail": "Attendance and trainer feedback remain part of the overall score and help signal delivery reliability across the cohort.",
+        }
+    )
     return insights
 
 
-def filter_roster(roster_df: pd.DataFrame, college: str, batch: str, quadrant: str, search_text: str) -> pd.DataFrame:
-    filtered_df = roster_df.copy()
-    if college != "All Colleges":
-        filtered_df = filtered_df[filtered_df["College"].astype(str) == college].copy()
-    if batch != "All Batches":
-        filtered_df = filtered_df[filtered_df["Assigned Batch"].astype(str) == batch].copy()
-    if quadrant != "All Buckets":
-        filtered_df = filtered_df[filtered_df["Quadrant"].astype(str) == quadrant].copy()
-    if search_text:
-        needle = search_text.strip().lower()
-        filtered_df = filtered_df[
-            filtered_df["Candidate Name"].astype(str).str.lower().str.contains(needle, na=False)
-            | filtered_df["Superset ID"].astype(str).str.lower().str.contains(needle, na=False)
-        ].copy()
-    return filtered_df
-
-
-def build_metric_candidate_map(filtered_df: pd.DataFrame) -> pd.DataFrame:
+def _build_metric_candidate_map(filtered_df: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for bucket in QUADRANT_ORDER:
         bucket_df = filtered_df[filtered_df["Quadrant"].astype(str) == bucket].copy()
@@ -161,80 +184,184 @@ def build_metric_candidate_map(filtered_df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _build_integrity_view(filtered_df: pd.DataFrame, integrity_df: pd.DataFrame) -> pd.DataFrame:
+    published = {}
+    if not integrity_df.empty and {"Metric", "Value"} <= set(integrity_df.columns):
+        published = {str(row["Metric"]).strip(): row["Value"] for _, row in integrity_df.iterrows()}
+
+    total = len(filtered_df)
+    if total == 0:
+        return pd.DataFrame()
+
+    def coverage(series_name: str, week_name: str | None = None) -> int:
+        if week_name and week_name in filtered_df.columns:
+            return int((pd.to_numeric(filtered_df[week_name], errors="coerce").fillna(0) > 0).sum())
+        if series_name in filtered_df.columns:
+            return int(filtered_df[series_name].notna().sum())
+        return 0
+
+    rows = [
+        {
+            "Signal": "Assessment GitHub",
+            "Current View Coverage": coverage("Assessment GitHub Score", "Assessment GitHub Weeks"),
+            "Published Missing": int(float(published.get("Missing Assessment GitHub", 0) or 0)),
+            "Published ID Matches": int(float(published.get("Assessment GitHub ID Matches", 0) or 0)),
+        },
+        {
+            "Signal": "Assignment GitHub",
+            "Current View Coverage": coverage("Assignment GitHub Score", "Assignment GitHub Weeks"),
+            "Published Missing": int(float(published.get("Missing Assignment GitHub", 0) or 0)),
+            "Published ID Matches": int(float(published.get("Assignment GitHub ID Matches", 0) or 0)),
+        },
+        {
+            "Signal": "Top Brains",
+            "Current View Coverage": coverage("Top Brains Score", "Top Brains Weeks"),
+            "Published Missing": int(float(published.get("Missing Top Brains Signal", 0) or 0)),
+            "Published ID Matches": int(float(published.get("Top Brains ID Matches", 0) or 0)),
+        },
+        {
+            "Signal": "Trainer Feedback",
+            "Current View Coverage": coverage("Trainer Feedback Score"),
+            "Published Missing": int(float(published.get("Missing Feedback Signal", 0) or 0)),
+            "Published ID Matches": int(float(published.get("Feedback ID Matches", 0) or 0)),
+        },
+    ]
+    integrity_view = pd.DataFrame(rows)
+    integrity_view["Coverage %"] = integrity_view["Current View Coverage"] / total * 100
+    return integrity_view
+
+
+def _render_primary_card(title: str, value: int, share: float, description: str, accent: str) -> None:
+    st.markdown(
+        f"""
+        <div class="pmq-primary-card" style="--accent:{accent};">
+            <div class="pmq-card-kicker">{title}</div>
+            <div class="pmq-card-value">{value}</div>
+            <div class="pmq-card-share">{share:.0%} of current view</div>
+            <div class="pmq-card-detail">{description}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_signal_card(title: str, value: str, detail: str) -> None:
+    st.markdown(
+        f"""
+        <div class="pmq-signal-card">
+            <div class="pmq-signal-title">{title}</div>
+            <div class="pmq-signal-value">{value}</div>
+            <div class="pmq-signal-detail">{detail}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_context_chip(label: str, value: str) -> None:
+    st.markdown(
+        f"""
+        <div class="pmq-chip">
+            <span class="pmq-chip-label">{label}</span>
+            <span class="pmq-chip-value">{value}</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def run() -> None:
     st.markdown(
         """
         <style>
         .block-container {
-            padding-top: 1.6rem;
-            padding-bottom: 2.2rem;
-            max-width: 1380px;
+            max-width: 1420px;
+            padding-top: 1.4rem;
+            padding-bottom: 2.6rem;
         }
-        .client-pmq-hero {
+        [data-testid="stHorizontalBlock"] > div:has(.pmq-primary-card),
+        [data-testid="stHorizontalBlock"] > div:has(.pmq-signal-card) {
+            height: 100%;
+        }
+        .pmq-hero {
             background:
-                radial-gradient(circle at top left, rgba(196, 138, 18, 0.30), transparent 24%),
-                radial-gradient(circle at bottom right, rgba(15, 157, 88, 0.18), transparent 20%),
-                linear-gradient(135deg, #111827 0%, #172033 46%, #0f172a 100%);
-            border-radius: 28px;
-            padding: 32px 34px 28px 34px;
-            margin-bottom: 20px;
-            box-shadow: 0 26px 54px rgba(15, 23, 42, 0.20);
+                radial-gradient(circle at top left, rgba(251, 191, 36, 0.18), transparent 24%),
+                radial-gradient(circle at bottom right, rgba(45, 212, 191, 0.14), transparent 20%),
+                linear-gradient(135deg, #0f172a 0%, #172033 46%, #1e293b 100%);
             border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 30px;
+            padding: 32px 34px 26px 34px;
+            box-shadow: 0 30px 55px rgba(15, 23, 42, 0.20);
+            margin-bottom: 18px;
         }
-        .client-pmq-title {
+        .pmq-hero-title {
             color: #f8fafc;
-            font-size: 42px;
+            font-size: 40px;
             font-weight: 800;
             line-height: 1.05;
             margin-bottom: 10px;
             font-family: Georgia, "Times New Roman", serif;
         }
-        .client-pmq-subtitle {
-            color: #dbe4ef;
+        .pmq-hero-subtitle {
+            color: #d7e1ec;
             font-size: 15px;
-            line-height: 1.72;
-            max-width: 940px;
+            line-height: 1.75;
+            max-width: 980px;
+            margin-bottom: 18px;
         }
-        .client-pmq-pill {
-            display: inline-block;
-            padding: 10px 15px;
-            margin: 10px 10px 0 0;
+        .pmq-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            margin: 8px 10px 0 0;
+            padding: 10px 14px;
             border-radius: 999px;
-            background: rgba(255, 255, 255, 0.09);
-            color: #f8fafc;
-            font-size: 13px;
+            background: rgba(255,255,255,0.09);
             border: 1px solid rgba(255,255,255,0.08);
-            backdrop-filter: blur(5px);
+            color: #f8fafc;
         }
-        .client-pmq-filter-panel {
+        .pmq-chip-label {
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: #bfdbfe;
+            font-weight: 700;
+        }
+        .pmq-chip-value {
+            font-size: 13px;
+            color: #ffffff;
+            font-weight: 700;
+        }
+        .pmq-filter-wrap {
             background: linear-gradient(180deg, #ffffff 0%, #fbfcfe 100%);
-            border: 1px solid #d9e5f1;
-            border-radius: 22px;
-            padding: 18px 18px 12px 18px;
-            box-shadow: 0 18px 32px rgba(15,23,42,0.05);
-            margin-bottom: 20px;
+            border: 1px solid #dbe4ef;
+            border-radius: 24px;
+            padding: 18px 18px 10px 18px;
+            box-shadow: 0 18px 30px rgba(15, 23, 42, 0.05);
+            margin-bottom: 18px;
         }
-        .client-pmq-filter-title {
+        .pmq-filter-title {
             color: #0f172a;
             font-size: 18px;
             font-weight: 800;
             margin-bottom: 4px;
         }
-        .client-pmq-filter-subtitle {
+        .pmq-filter-subtitle {
             color: #64748b;
             font-size: 13px;
+            line-height: 1.6;
             margin-bottom: 14px;
         }
-        .client-pmq-card {
+        .pmq-primary-card {
             background: linear-gradient(180deg, #ffffff 0%, #f9fbfd 100%);
-            border-radius: 24px;
             border: 1px solid #e2e8f0;
-            border-top: 6px solid var(--card-accent);
-            padding: 24px 24px 20px 24px;
+            border-top: 6px solid var(--accent);
+            border-radius: 24px;
+            min-height: 218px;
+            padding: 22px 22px 18px 22px;
             box-shadow: 0 18px 34px rgba(15, 23, 42, 0.08);
-            min-height: 206px;
         }
-        .client-pmq-card-title {
+        .pmq-card-kicker {
             color: #0f172a;
             font-size: 13px;
             font-weight: 800;
@@ -242,28 +369,34 @@ def run() -> None:
             letter-spacing: 1.1px;
             margin-bottom: 14px;
         }
-        .client-pmq-card-value {
+        .pmq-card-value {
             color: #0f172a;
-            font-size: 50px;
+            font-size: 52px;
             font-weight: 800;
             line-height: 1;
-            margin-bottom: 12px;
+            margin-bottom: 10px;
             font-family: Georgia, "Times New Roman", serif;
         }
-        .client-pmq-card-subtitle {
+        .pmq-card-share {
+            color: #0f172a;
+            font-size: 14px;
+            font-weight: 800;
+            margin-bottom: 10px;
+        }
+        .pmq-card-detail {
             color: #475569;
             font-size: 14px;
             line-height: 1.68;
         }
-        .client-pmq-signal-card {
+        .pmq-signal-card {
             background: linear-gradient(180deg, #ffffff 0%, #fbfcfe 100%);
+            border: 1px solid #dce8f6;
             border-radius: 18px;
-            border: 1px solid #dbe7f5;
-            padding: 18px 18px 16px 18px;
-            box-shadow: 0 14px 26px rgba(15, 23, 42, 0.05);
-            min-height: 136px;
+            min-height: 146px;
+            padding: 18px;
+            box-shadow: 0 14px 24px rgba(15, 23, 42, 0.05);
         }
-        .client-pmq-signal-title {
+        .pmq-signal-title {
             color: #64748b;
             font-size: 12px;
             font-weight: 800;
@@ -271,65 +404,97 @@ def run() -> None:
             letter-spacing: 1px;
             margin-bottom: 10px;
         }
-        .client-pmq-signal-value {
+        .pmq-signal-value {
             color: #0f172a;
             font-size: 30px;
             font-weight: 800;
-            line-height: 1.1;
+            line-height: 1.05;
             margin-bottom: 8px;
             font-family: Georgia, "Times New Roman", serif;
         }
-        .client-pmq-signal-subtitle {
+        .pmq-signal-detail {
             color: #64748b;
             font-size: 13px;
-            line-height: 1.6;
+            line-height: 1.58;
         }
-        .client-pmq-panel {
+        .pmq-panel {
             background: linear-gradient(180deg, #ffffff 0%, #fbfcfe 100%);
             border: 1px solid #dbe7f5;
             border-radius: 22px;
-            box-shadow: 0 18px 32px rgba(15,23,42,0.06);
+            box-shadow: 0 18px 32px rgba(15, 23, 42, 0.05);
             padding: 22px 24px;
             margin-bottom: 18px;
         }
-        .client-pmq-panel-title {
+        .pmq-panel-title {
             color: #0f172a;
             font-size: 24px;
             font-weight: 800;
             margin-bottom: 6px;
             font-family: Georgia, "Times New Roman", serif;
         }
-        .client-pmq-panel-subtitle {
+        .pmq-panel-subtitle {
             color: #64748b;
             font-size: 14px;
             line-height: 1.65;
-            margin-bottom: 18px;
+            margin-bottom: 16px;
         }
-        .client-pmq-insight {
+        .pmq-mini-note {
             background: linear-gradient(180deg, #fffef8 0%, #ffffff 100%);
-            border: 1px solid #f2e4bf;
-            border-left: 6px solid #c48a12;
+            border: 1px solid #f0e0b9;
+            border-left: 6px solid #d4a017;
             border-radius: 16px;
             padding: 16px 18px;
             margin-bottom: 12px;
         }
-        .client-pmq-insight-headline {
+        .pmq-mini-note h4 {
             color: #0f172a;
             font-size: 15px;
             font-weight: 800;
-            margin-bottom: 6px;
+            margin: 0 0 6px 0;
         }
-        .client-pmq-insight-detail {
+        .pmq-mini-note p {
             color: #475569;
             font-size: 13px;
             line-height: 1.68;
+            margin: 0;
         }
-        div[data-testid="stMetric"] {
-            background: linear-gradient(180deg, #ffffff 0%, #fbfcfe 100%);
+        .pmq-integrity-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 12px;
+        }
+        .pmq-integrity-card {
+            background: #ffffff;
             border: 1px solid #dbe7f5;
             border-radius: 16px;
-            padding: 16px 18px 10px 18px;
-            box-shadow: 0 14px 24px rgba(15,23,42,0.04);
+            padding: 16px;
+        }
+        .pmq-integrity-title {
+            font-size: 14px;
+            font-weight: 800;
+            color: #0f172a;
+            margin-bottom: 10px;
+        }
+        .pmq-integrity-row {
+            display: flex;
+            justify-content: space-between;
+            gap: 10px;
+            margin-bottom: 6px;
+            color: #475569;
+            font-size: 13px;
+        }
+        .pmq-badge {
+            display: inline-block;
+            padding: 5px 10px;
+            border-radius: 999px;
+            background: #e8fff3;
+            color: #047857;
+            font-size: 12px;
+            font-weight: 800;
+            margin-top: 6px;
+        }
+        div[data-testid="stTabs"] button {
+            font-weight: 700;
         }
         </style>
         """,
@@ -338,10 +503,10 @@ def run() -> None:
 
     st.markdown(
         """
-        <div class="client-pmq-hero">
-            <div class="client-pmq-title">Executive Performance Dashboard</div>
-            <div class="client-pmq-subtitle">
-                Leadership view built from the final published PMQ workbook. This dashboard is designed for executive review, strategic cohort scanning, and clear candidate segmentation without exposing the operational ingestion workflow.
+        <div class="pmq-hero">
+            <div class="pmq-hero-title">Executive Performance Dashboard</div>
+            <div class="pmq-hero-subtitle">
+                A leadership-facing view of the final PMQ workbook. This page translates the published report into a clearer performance story using the summary, integrity, bucket, insight, plotting, and roster sheets.
             </div>
         </div>
         """,
@@ -349,42 +514,35 @@ def run() -> None:
     )
 
     if not REPORT_PATH.exists():
-        st.error(f"No published PMQ dashboard workbook was found at {REPORT_PATH}")
-        st.caption("Publish the current PMQ report first from Performance Magic Quadrant Plus.")
+        st.error(f"No published PMQ workbook was found at {REPORT_PATH}")
+        st.caption("Publish the final PMQ dashboard workbook first.")
         return
 
-    payload = load_dashboard_payload(REPORT_PATH)
+    payload = _load_payload(REPORT_PATH)
     summary_df = payload["summary"]
-    roster_df = payload["roster"]
+    counts_df = payload["counts"]
+    integrity_df = payload["integrity"]
+    insights_df = payload["insights"]
+    plot_df = _coerce_numeric(payload["plot"], TRACKER_COLUMNS)
+    roster_df = _coerce_numeric(payload["roster"], TRACKER_COLUMNS)
 
     if roster_df.empty:
-        st.error("The published PMQ workbook is missing the executive roster sheet. Re-publish the dashboard report from Task 5.")
+        st.error("The published PMQ workbook is missing the executive roster sheet. Re-publish the dashboard report from Performance Magic Quadrant Plus.")
         return
 
-    for column in [
-        "Assessment Composite Score",
-        "Assignment GitHub Score",
-        "Performance Score",
-        "Overall Performance Score",
-        "Attendance %",
-        "Trainer Feedback Score",
-    ]:
-        if column in roster_df.columns:
-            roster_df[column] = pd.to_numeric(roster_df[column], errors="coerce")
-
-    summary = summary_lookup(summary_df)
+    summary = _summary_lookup(summary_df)
     colleges = ["All Colleges"] + sorted(roster_df["College"].dropna().astype(str).unique().tolist())
 
     st.markdown(
         """
-        <div class="client-pmq-filter-panel">
-            <div class="client-pmq-filter-title">Executive Filters</div>
-            <div class="client-pmq-filter-subtitle">Refine the leadership view by college, batch, bucket, or candidate. All cards and charts below react to the current selection.</div>
+        <div class="pmq-filter-wrap">
+            <div class="pmq-filter-title">View Controls</div>
+            <div class="pmq-filter-subtitle">Use the filters below to refine the leadership view. Cards, insights, charts, and drilldowns all respond to the current selection.</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
-    filter_cols = st.columns([1, 1, 1, 1.2])
+    filter_cols = st.columns([1, 1, 1, 1.15])
     with filter_cols[0]:
         selected_college = st.selectbox("College", colleges, key="task8_college_filter")
     scoped_batch_df = roster_df if selected_college == "All Colleges" else roster_df[roster_df["College"].astype(str) == selected_college]
@@ -396,14 +554,20 @@ def run() -> None:
     with filter_cols[3]:
         search_text = st.text_input("Search Candidate / Superset ID", key="task8_search_text").strip()
 
-    filtered_df = filter_roster(roster_df, selected_college, selected_batch, selected_quadrant, search_text)
+    filtered_roster = _filter_frame(roster_df, selected_college, selected_batch, selected_quadrant, search_text)
+    filtered_plot = _filter_frame(plot_df, selected_college, selected_batch, selected_quadrant, search_text)
 
-    st.markdown(f"<div class='client-pmq-pill'><b>Population:</b> {summary.get('Population Scope', 'N/A')}</div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='client-pmq-pill'><b>Weighted Model:</b> {summary.get('Weighted Model', 'N/A')}</div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='client-pmq-pill'><b>Bucket Basis:</b> {summary.get('Quadrant Bucket Basis', 'N/A')}</div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='client-pmq-pill'><b>Current View:</b> {selected_college} | {selected_batch} | {selected_quadrant}</div>", unsafe_allow_html=True)
+    chip_cols = st.columns(4)
+    with chip_cols[0]:
+        _render_context_chip("Current View", f"{selected_college} | {selected_batch}")
+    with chip_cols[1]:
+        _render_context_chip("Population", str(len(filtered_roster)))
+    with chip_cols[2]:
+        _render_context_chip("Weighted Model", str(summary.get("Weighted Model", "Published workbook")))
+    with chip_cols[3]:
+        _render_context_chip("Bucket Basis", str(summary.get("Quadrant Bucket Basis", "Performance grade bands")))
 
-    if filtered_df.empty:
+    if filtered_roster.empty:
         st.warning("No candidates match the current selection.")
         with open(REPORT_PATH, "rb") as report_handle:
             st.download_button(
@@ -415,243 +579,423 @@ def run() -> None:
             )
         return
 
-    counts = filtered_df["Quadrant"].value_counts()
+    counts = filtered_roster["Quadrant"].value_counts()
+    total = len(filtered_roster)
     card_cols = st.columns(4)
     for col, bucket in zip(card_cols, QUADRANT_ORDER):
         with col:
-            render_count_card(
+            _render_primary_card(
                 bucket,
                 int(counts.get(bucket, 0)),
+                (counts.get(bucket, 0) / total) if total else 0,
                 QUADRANT_DESCRIPTIONS[bucket],
                 QUADRANT_COLORS[bucket],
             )
 
-    signal_cols = st.columns(4)
-    avg_performance = pd.to_numeric(filtered_df["Performance Score"], errors="coerce").mean()
-    avg_overall = pd.to_numeric(filtered_df["Overall Performance Score"], errors="coerce").mean()
-    avg_assessment = pd.to_numeric(filtered_df["Assessment Composite Score"], errors="coerce").mean()
-    avg_assignment = pd.to_numeric(filtered_df["Assignment GitHub Score"], errors="coerce").mean()
-    signal_data = [
-        ("Current View Size", f"{len(filtered_df)}", "Students currently included after filters."),
-        ("Avg Performance", f"{avg_performance:.1f}", "Bucket-driving technical performance score."),
-        ("Avg Overall Score", f"{avg_overall:.1f}", "Leadership-facing 50/35/10/5 weighted score."),
-        ("Assessment / Assignment", f"{avg_assessment:.1f} / {avg_assignment:.1f}", "Average assessment composite versus assignment execution."),
-    ]
-    for col, (title, value, subtitle) in zip(signal_cols, signal_data):
-        with col:
-            render_signal_card(title, value, subtitle)
+    avg_assessment = filtered_roster["Assessment Composite Score"].mean()
+    avg_assignment = filtered_roster["Assignment GitHub Score"].mean()
+    avg_performance = filtered_roster["Performance Score"].mean()
+    avg_overall = filtered_roster["Overall Performance Score"].mean()
+    avg_attendance = filtered_roster["Attendance %"].mean()
+    avg_feedback = filtered_roster["Trainer Feedback Score"].mean()
 
-    overview_tab, insights_tab, roster_tab = st.tabs(["Overview", "Leadership Narrative", "Roster & Drilldown"])
+    signal_cols = st.columns(6)
+    signal_data = [
+        ("Current View Size", f"{len(filtered_roster)}", "Students included after filters."),
+        ("Avg Performance", _format_value(avg_performance), "The score that drives the performance bucket."),
+        ("Avg Overall", _format_value(avg_overall), "Full weighted outcome from the published PMQ model."),
+        ("Assessment Composite", _format_value(avg_assessment), "Average of GitHub assessment and Top Brains signals."),
+        ("Assignment GitHub", _format_value(avg_assignment), "Average assignment execution score in the current view."),
+        ("Attendance / Feedback", f"{_format_value(avg_attendance)} / {_format_value(avg_feedback)}", "Attendance and trainer signals in the current selection."),
+    ]
+    for col, (title, value, detail) in zip(signal_cols, signal_data):
+        with col:
+            _render_signal_card(title, value, detail)
+
+    overview_tab, signals_tab, candidates_tab = st.tabs(["Overview", "Signals & Insights", "Candidate Drilldown"])
 
     with overview_tab:
-        left_col, right_col = st.columns([1.05, 1])
-        with left_col:
+        top_left, top_right = st.columns([1.05, 1])
+        with top_left:
             st.markdown(
                 """
-                <div class="client-pmq-panel">
-                    <div class="client-pmq-panel-title">Performance Bucket Split</div>
-                    <div class="client-pmq-panel-subtitle">High-level bucket composition for the current view.</div>
+                <div class="pmq-panel">
+                    <div class="pmq-panel-title">Bucket Composition</div>
+                    <div class="pmq-panel-subtitle">Current-view readiness split across the four published performance buckets.</div>
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
-            bar_df = pd.DataFrame(
+            bucket_df = pd.DataFrame(
                 [{"Metric": bucket, "Count": int(counts.get(bucket, 0))} for bucket in QUADRANT_ORDER]
             )
-            fig_bar = px.bar(
-                bar_df,
-                x="Count",
-                y="Metric",
-                orientation="h",
+            fig_donut = px.pie(
+                bucket_df,
+                names="Metric",
+                values="Count",
+                hole=0.62,
                 color="Metric",
                 color_discrete_map=QUADRANT_COLORS,
-                text="Count",
             )
-            fig_bar.update_layout(
-                height=430,
-                showlegend=False,
-                plot_bgcolor="white",
+            fig_donut.update_traces(textposition="inside", textinfo="percent+label")
+            fig_donut.update_layout(
+                height=420,
                 paper_bgcolor="white",
-                margin=dict(l=8, r=8, t=8, b=8),
-                xaxis_title="Candidates",
-                yaxis_title="",
+                plot_bgcolor="white",
+                margin=dict(l=10, r=10, t=10, b=10),
+                legend_title="",
             )
-            fig_bar.update_traces(textposition="outside")
-            st.plotly_chart(fig_bar, use_container_width=True)
+            st.plotly_chart(fig_donut, use_container_width=True)
 
-        with right_col:
+        with top_right:
             st.markdown(
                 """
-                <div class="client-pmq-panel">
-                    <div class="client-pmq-panel-title">Score Distribution Map</div>
-                    <div class="client-pmq-panel-subtitle">Performance score drives the bucket, while overall score shows the full management-weighted outcome.</div>
+                <div class="pmq-panel">
+                    <div class="pmq-panel-title">Score Driver Profile</div>
+                    <div class="pmq-panel-subtitle">How the core PMQ score components are currently behaving in the selected view.</div>
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
-            scatter_cols = [
-                column
-                for column in [
-                    "Superset ID",
-                    "Candidate Name",
-                    "College",
-                    "Assigned Batch",
-                    "Quadrant",
-                    "Performance Score",
-                    "Overall Performance Score",
-                    "Assessment Composite Score",
-                    "Assignment GitHub Score",
-                    "Attendance %",
-                    "Trainer Feedback Score",
+            driver_df = pd.DataFrame(
+                [
+                    {"Signal": "Assessment Composite", "Average Score": avg_assessment},
+                    {"Signal": "Assignment GitHub", "Average Score": avg_assignment},
+                    {"Signal": "Attendance", "Average Score": avg_attendance},
+                    {"Signal": "Trainer Feedback", "Average Score": avg_feedback},
+                    {"Signal": "Performance Score", "Average Score": avg_performance},
+                    {"Signal": "Overall Score", "Average Score": avg_overall},
                 ]
-                if column in filtered_df.columns
-            ]
-            plot_df = filtered_df[scatter_cols].copy()
-            fig_scatter = px.scatter(
-                plot_df,
-                x="Overall Performance Score",
-                y="Performance Score",
-                color="Quadrant",
-                color_discrete_map=QUADRANT_COLORS,
-                hover_data={
-                    "Superset ID": True,
-                    "Candidate Name": True,
-                    "College": True,
-                    "Assigned Batch": True,
-                    "Assessment Composite Score": ':.1f',
-                    "Assignment GitHub Score": ':.1f',
-                    "Attendance %": ':.1f',
-                    "Trainer Feedback Score": ':.1f',
-                    "Overall Performance Score": ':.1f',
-                    "Performance Score": ':.1f',
-                },
             )
-            fig_scatter.add_hline(y=80, line_width=2, line_dash="dash", line_color="#a0aec0")
-            fig_scatter.add_hline(y=70, line_width=2, line_dash="dash", line_color="#a0aec0")
-            fig_scatter.add_hline(y=60, line_width=2, line_dash="dash", line_color="#a0aec0")
-            fig_scatter.update_layout(
-                height=430,
-                plot_bgcolor="white",
+            fig_driver = px.bar(
+                driver_df,
+                x="Average Score",
+                y="Signal",
+                orientation="h",
+                text="Average Score",
+                color="Signal",
+                color_discrete_sequence=["#123b6d", "#1c64f2", "#12b981", "#d4a017", "#7c3aed", "#0f172a"],
+            )
+            fig_driver.update_traces(texttemplate="%{text:.1f}", textposition="outside")
+            fig_driver.update_layout(
+                height=420,
+                showlegend=False,
                 paper_bgcolor="white",
-                margin=dict(l=8, r=8, t=8, b=8),
-                legend_title="",
+                plot_bgcolor="white",
+                margin=dict(l=10, r=10, t=10, b=10),
+                xaxis_title="Average Score",
+                yaxis_title="",
             )
-            fig_scatter.update_xaxes(title="Overall Performance Score", range=[0, 100], showgrid=False)
-            fig_scatter.update_yaxes(title="Performance Score", range=[0, 100], showgrid=False)
-            st.plotly_chart(fig_scatter, use_container_width=True)
+            fig_driver.update_xaxes(range=[0, 100])
+            st.plotly_chart(fig_driver, use_container_width=True)
 
-        lower_left, lower_right = st.columns([1.05, 1])
+        lower_left, lower_right = st.columns([1, 1.05])
         with lower_left:
             st.markdown(
                 """
-                <div class="client-pmq-panel">
-                    <div class="client-pmq-panel-title">Top 10 Performers</div>
-                    <div class="client-pmq-panel-subtitle">Highest overall performers in the current filtered view.</div>
+                <div class="pmq-panel">
+                    <div class="pmq-panel-title">Performance Grade Mix</div>
+                    <div class="pmq-panel-subtitle">Grade-level view of the bucket-driving performance score.</div>
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
-            top_df = filtered_df.sort_values(by="Overall Performance Score", ascending=False).head(10).copy()
-            fig_top = px.bar(
-                top_df,
-                x="Overall Performance Score",
-                y="Candidate Name",
-                orientation="h",
-                color="Quadrant",
-                color_discrete_map=QUADRANT_COLORS,
-                text="Overall Performance Score",
+            grade_df = (
+                filtered_roster["Performance Grade"]
+                .astype(str)
+                .value_counts()
+                .reindex(GRADE_ORDER, fill_value=0)
+                .rename_axis("Performance Grade")
+                .reset_index(name="Students")
             )
-            fig_top.update_layout(
-                height=420,
-                plot_bgcolor="white",
+            fig_grade = px.bar(
+                grade_df,
+                x="Performance Grade",
+                y="Students",
+                color="Performance Grade",
+                text="Students",
+                color_discrete_map={
+                    "A+": "#0f9d58",
+                    "A": "#34d399",
+                    "B": "#d4a017",
+                    "C": "#3b82f6",
+                    "F": "#ef4444",
+                },
+            )
+            fig_grade.update_layout(
+                height=380,
+                showlegend=False,
                 paper_bgcolor="white",
-                margin=dict(l=8, r=8, t=8, b=8),
-                legend_title="",
-                yaxis_title="",
+                plot_bgcolor="white",
+                margin=dict(l=10, r=10, t=10, b=10),
             )
-            fig_top.update_traces(texttemplate="%{text:.1f}", textposition="outside")
-            st.plotly_chart(fig_top, use_container_width=True)
+            fig_grade.update_traces(textposition="outside")
+            st.plotly_chart(fig_grade, use_container_width=True)
 
         with lower_right:
             st.markdown(
                 """
-                <div class="client-pmq-panel">
-                    <div class="client-pmq-panel-title">Bottom 10 Needing Focus</div>
-                    <div class="client-pmq-panel-subtitle">Lowest overall performers in the current filtered view.</div>
+                <div class="pmq-panel">
+                    <div class="pmq-panel-title">Performance Ladder</div>
+                    <div class="pmq-panel-subtitle">Top current-view candidates ranked by performance score, which directly drives the bucket assignment.</div>
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
-            bottom_df = filtered_df.sort_values(by="Overall Performance Score", ascending=True).head(10).copy()
-            fig_bottom = px.bar(
-                bottom_df,
-                x="Overall Performance Score",
+            ladder_df = filtered_plot.sort_values(by="Performance Score", ascending=False).head(12).copy()
+            fig_ladder = px.bar(
+                ladder_df,
+                x="Performance Score",
                 y="Candidate Name",
                 orientation="h",
                 color="Quadrant",
+                text="Performance Score",
                 color_discrete_map=QUADRANT_COLORS,
-                text="Overall Performance Score",
+                hover_data={
+                    "Superset ID": True,
+                    "Assigned Batch": True,
+                    "Assessment Composite Score": ":.1f",
+                    "Assignment GitHub Score": ":.1f",
+                    "Overall Performance Score": ":.1f",
+                },
             )
-            fig_bottom.update_layout(
-                height=420,
-                plot_bgcolor="white",
+            fig_ladder.update_layout(
+                height=380,
                 paper_bgcolor="white",
-                margin=dict(l=8, r=8, t=8, b=8),
-                legend_title="",
+                plot_bgcolor="white",
+                margin=dict(l=10, r=10, t=10, b=10),
                 yaxis_title="",
+                xaxis_title="Performance Score",
+                legend_title="",
             )
-            fig_bottom.update_traces(texttemplate="%{text:.1f}", textposition="outside")
-            st.plotly_chart(fig_bottom, use_container_width=True)
+            fig_ladder.update_traces(texttemplate="%{text:.1f}", textposition="outside")
+            fig_ladder.update_xaxes(range=[0, 100])
+            st.plotly_chart(fig_ladder, use_container_width=True)
 
-    with insights_tab:
-        insight_col, map_col = st.columns([1, 1.05])
-        with insight_col:
+        st.markdown(
+            """
+            <div class="pmq-panel">
+                <div class="pmq-panel-title">Published Snapshot</div>
+                <div class="pmq-panel-subtitle">Summary values taken directly from the published PMQ workbook, useful as a reference point alongside the current filtered view.</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        snapshot_cols = st.columns(6)
+        snapshot_cards = [
+            ("Published Students", str(summary.get("Total Students", "N/A")), "Workbook-level population in the published report."),
+            ("Assessment Composite", str(summary.get("Average Assessment Composite Score", "N/A")), "Published workbook average."),
+            ("Assignment GitHub", str(summary.get("Average Assignment GitHub Score", "N/A")), "Published workbook average."),
+            ("Attendance", str(summary.get("Average Attendance %", "N/A")), "Published workbook average."),
+            ("Trainer Feedback", str(summary.get("Average Trainer Feedback Score", "N/A")), "Published workbook average."),
+            ("Overall Score", str(summary.get("Average Overall Performance Score", "N/A")), "Published workbook average."),
+        ]
+        for col, (title, value, detail) in zip(snapshot_cols, snapshot_cards):
+            with col:
+                _render_signal_card(title, value, detail)
+
+    with signals_tab:
+        left_col, right_col = st.columns([1, 1.1])
+        with left_col:
             st.markdown(
                 """
-                <div class="client-pmq-panel">
-                    <div class="client-pmq-panel-title">Leadership Narrative</div>
-                    <div class="client-pmq-panel-subtitle">Automatically generated observations from the current selection.</div>
+                <div class="pmq-panel">
+                    <div class="pmq-panel-title">Signal Integrity</div>
+                    <div class="pmq-panel-subtitle">Published matching quality and current-view signal availability, based on the dedicated integrity sheet in the workbook.</div>
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
-            for insight in build_dynamic_insights(filtered_df):
+            integrity_view = _build_integrity_view(filtered_roster, integrity_df)
+            integrity_cols = st.columns(2)
+            for index, (_, row) in enumerate(integrity_view.iterrows()):
+                with integrity_cols[index % 2]:
+                    st.markdown(
+                        f"""
+                        <div class="pmq-integrity-card">
+                            <div class="pmq-integrity-title">{row['Signal']}</div>
+                            <div class="pmq-integrity-row"><span>Current View Coverage</span><strong>{int(row['Current View Coverage'])} / {len(filtered_roster)} ({row['Coverage %']:.0f}%)</strong></div>
+                            <div class="pmq-integrity-row"><span>Published ID Matches</span><strong>{int(row['Published ID Matches'])}</strong></div>
+                            <div class="pmq-integrity-row"><span>Published Missing Signals</span><strong>{int(row['Published Missing'])}</strong></div>
+                            <div class="pmq-badge">Workbook integrity check</div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+
+            if not counts_df.empty:
+                st.markdown(
+                    """
+                    <div class="pmq-panel" style="margin-top:18px;">
+                        <div class="pmq-panel-title">Published Bucket Definitions</div>
+                        <div class="pmq-panel-subtitle">Definitions sourced from the quadrant-count sheet in the published workbook.</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+                for _, row in counts_df.iterrows():
+                    st.markdown(
+                        f"""
+                        <div class="pmq-mini-note">
+                            <h4>{row['Metric']} ({int(row['Count'])})</h4>
+                            <p>{row['Definition']}</p>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+
+        with right_col:
+            st.markdown(
+                """
+                <div class="pmq-panel">
+                    <div class="pmq-panel-title">Published Insights & Current Narrative</div>
+                    <div class="pmq-panel-subtitle">Workbook-provided observations blended with live commentary from the current filtered view.</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            if not insights_df.empty:
+                for _, row in insights_df.iterrows():
+                    st.markdown(
+                        f"""
+                        <div class="pmq-mini-note">
+                            <h4>{row['Headline']}</h4>
+                            <p>{row['Detail']}</p>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+            for insight in _build_dynamic_insights(filtered_roster):
                 st.markdown(
                     f"""
-                    <div class="client-pmq-insight">
-                        <div class="client-pmq-insight-headline">{insight["headline"]}</div>
-                        <div class="client-pmq-insight-detail">{insight["detail"]}</div>
+                    <div class="pmq-mini-note">
+                        <h4>{insight['headline']}</h4>
+                        <p>{insight['detail']}</p>
                     </div>
                     """,
                     unsafe_allow_html=True,
                 )
 
-        with map_col:
-            st.markdown(
-                """
-                <div class="client-pmq-panel">
-                    <div class="client-pmq-panel-title">Bucket-to-Candidate Mapping</div>
-                    <div class="client-pmq-panel-subtitle">Expand any bucket to see the candidates driving that metric.</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-            metric_map_df = build_metric_candidate_map(filtered_df)
-            for _, row in metric_map_df.iterrows():
-                with st.expander(f"{row['Metric']} ({row['Count']})", expanded=False):
-                    st.text(row["Candidate Details"])
+            focus_left, focus_right = st.columns(2)
+            with focus_left:
+                st.markdown(
+                    """
+                    <div class="pmq-panel" style="margin-top:18px;">
+                        <div class="pmq-panel-title">Closest To Deployable</div>
+                        <div class="pmq-panel-subtitle">Progressing candidates nearest to the top performance band.</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+                closest_df = (
+                    filtered_roster[filtered_roster["Quadrant"].astype(str) == "Progressing Candidates"]
+                    .sort_values(by="Performance Score", ascending=False)
+                    .head(8)[
+                        [
+                            "Superset ID",
+                            "Candidate Name",
+                            "Assigned Batch",
+                            "Performance Score",
+                            "Overall Performance Score",
+                        ]
+                    ]
+                    .copy()
+                )
+                st.dataframe(closest_df.fillna("N/A"), use_container_width=True, hide_index=True)
 
-    with roster_tab:
+            with focus_right:
+                st.markdown(
+                    """
+                    <div class="pmq-panel" style="margin-top:18px;">
+                        <div class="pmq-panel-title">Needs Immediate Review</div>
+                        <div class="pmq-panel-subtitle">Lowest-performing candidates in the current selection.</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+                review_df = (
+                    filtered_roster.sort_values(by="Performance Score", ascending=True)
+                    .head(8)[
+                        [
+                            "Superset ID",
+                            "Candidate Name",
+                            "Assigned Batch",
+                            "Performance Score",
+                            "Overall Performance Score",
+                            "Quadrant",
+                        ]
+                    ]
+                    .copy()
+                )
+                st.dataframe(review_df.fillna("N/A"), use_container_width=True, hide_index=True)
+
+    with candidates_tab:
         st.markdown(
             """
-            <div class="client-pmq-panel">
-                <div class="client-pmq-panel-title">Executive Roster</div>
-                <div class="client-pmq-panel-subtitle">Detailed management roster for the current selection.</div>
+            <div class="pmq-panel">
+                <div class="pmq-panel-title">Candidate Drilldown</div>
+                <div class="pmq-panel-subtitle">Bucket-level candidate mapping and the detailed roster for the current selection.</div>
             </div>
             """,
             unsafe_allow_html=True,
         )
-        st.dataframe(filtered_df.fillna("N/A"), use_container_width=True, hide_index=True)
+
+        using_published_candidate_map = (
+            selected_college == "All Colleges"
+            and selected_batch == "All Batches"
+            and selected_quadrant == "All Buckets"
+            and not search_text
+            and not payload["candidate_map"].empty
+        )
+        candidate_map_df = payload["candidate_map"].copy() if using_published_candidate_map else _build_metric_candidate_map(filtered_roster)
+
+        map_col, roster_col = st.columns([0.95, 1.05])
+        with map_col:
+            st.markdown(
+                """
+                <div class="pmq-panel">
+                    <div class="pmq-panel-title">Bucket-to-Candidate Mapping</div>
+                    <div class="pmq-panel-subtitle">Use the expanders below to inspect the candidate list behind each bucket count.</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            for _, row in candidate_map_df.iterrows():
+                count_value = int(row["Count"]) if not pd.isna(row["Count"]) else 0
+                with st.expander(f"{row['Metric']} ({count_value})", expanded=False):
+                    st.text(str(row["Candidate Details"]))
+
+        with roster_col:
+            st.markdown(
+                """
+                <div class="pmq-panel">
+                    <div class="pmq-panel-title">Current View Roster</div>
+                    <div class="pmq-panel-subtitle">Leadership-ready roster with the core PMQ columns preserved from the published workbook.</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            preferred_columns = [
+                "Superset ID",
+                "Candidate Name",
+                "College",
+                "Assigned Batch",
+                "Assessment GitHub Score",
+                "Assessment GitHub Weeks",
+                "Top Brains Score",
+                "Assessment Composite Score",
+                "Assignment GitHub Score",
+                "Assignment GitHub Weeks",
+                "Attendance %",
+                "Trainer Feedback Score",
+                "Performance Score",
+                "Performance Grade",
+                "Overall Performance Score",
+                "Overall Grade",
+                "Quadrant",
+            ]
+            display_columns = [column for column in preferred_columns if column in filtered_roster.columns]
+            st.dataframe(filtered_roster[display_columns].fillna("N/A"), use_container_width=True, hide_index=True)
 
     with open(REPORT_PATH, "rb") as report_handle:
         st.download_button(
