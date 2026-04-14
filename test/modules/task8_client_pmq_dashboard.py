@@ -88,6 +88,20 @@ def _as_numeric(value: object) -> float | None:
     return float(numeric)
 
 
+def _resolve_average(primary_value: object, *fallback_values: object) -> float | None:
+    ordered_values = (primary_value,) + fallback_values
+    resolved = None
+    for value in ordered_values:
+        numeric = _as_numeric(value)
+        if numeric is None:
+            continue
+        if resolved is None:
+            resolved = numeric
+        if numeric > 0:
+            return numeric
+    return resolved
+
+
 def _coerce_numeric(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
     result = df.copy()
     for column in columns:
@@ -603,11 +617,16 @@ def run() -> None:
     avg_assignment = filtered_roster["Assignment GitHub Score"].mean()
     avg_performance = filtered_roster["Performance Score"].mean()
     avg_overall = filtered_roster["Overall Performance Score"].mean()
-    avg_attendance = filtered_roster["Attendance %"].mean()
-    avg_feedback = filtered_roster["Trainer Feedback Score"].mean()
-    summary_attendance = _as_numeric(summary.get("Average Attendance %"))
-    if (pd.isna(avg_attendance) or float(avg_attendance) == 0.0) and summary_attendance is not None:
-        avg_attendance = summary_attendance
+    avg_attendance = _resolve_average(
+        filtered_roster["Attendance %"].mean(),
+        filtered_plot["Attendance %"].mean() if "Attendance %" in filtered_plot.columns else None,
+        summary.get("Average Attendance %"),
+    )
+    avg_feedback = _resolve_average(
+        filtered_roster["Trainer Feedback Score"].mean(),
+        filtered_plot["Trainer Feedback Score"].mean() if "Trainer Feedback Score" in filtered_plot.columns else None,
+        summary.get("Average Trainer Feedback Score"),
+    )
 
     signal_cols = st.columns(6)
     signal_data = [
