@@ -337,26 +337,18 @@ def _build_integrity_view(filtered_df: pd.DataFrame, integrity_df: pd.DataFrame)
     return integrity_view
 
 
-def _render_primary_card(title: str, value: int, share: float, description: str, accent: str, button_key: str) -> bool:
+def _render_primary_card(title: str, value: int, share: float, description: str, accent: str) -> None:
     st.markdown(
         f"""
         <div class="pmq-primary-card" style="--accent:{accent};">
             <div class="pmq-card-kicker">{title}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    clicked = st.button(str(value), key=button_key, use_container_width=False)
-    st.markdown(
-        f"""
-        <div class="pmq-card-tail">
+            <div class="pmq-card-value">{value}</div>
             <div class="pmq-card-share">{share:.0%} of current view</div>
             <div class="pmq-card-detail">{description}</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
-    return clicked
 
 
 def _render_signal_card(title: str, value: str, detail: str) -> None:
@@ -492,10 +484,9 @@ def run() -> None:
             border: 1px solid #e2e8f0;
             border-top: 6px solid var(--accent);
             border-radius: 24px;
-            min-height: 86px;
-            padding: 22px 22px 8px 22px;
+            min-height: 218px;
+            padding: 22px 22px 18px 22px;
             box-shadow: 0 18px 34px rgba(15, 23, 42, 0.08);
-            margin-bottom: 4px;
         }
         .pmq-card-kicker {
             color: #0f172a;
@@ -503,16 +494,15 @@ def run() -> None:
             font-weight: 800;
             text-transform: uppercase;
             letter-spacing: 1.1px;
-            margin-bottom: 0;
+            margin-bottom: 14px;
         }
-        .pmq-card-tail {
-            background: linear-gradient(180deg, #ffffff 0%, #f9fbfd 100%);
-            border: 1px solid #e2e8f0;
-            border-top: 0;
-            border-radius: 0 0 24px 24px;
-            box-shadow: 0 18px 34px rgba(15, 23, 42, 0.08);
-            min-height: 118px;
-            padding: 2px 22px 18px 22px;
+        .pmq-card-value {
+            color: #0f172a;
+            font-size: 52px;
+            font-weight: 800;
+            line-height: 1;
+            margin-bottom: 10px;
+            font-family: Georgia, "Times New Roman", serif;
         }
         .pmq-card-share {
             color: #0f172a;
@@ -532,20 +522,20 @@ def run() -> None:
             background: transparent !important;
             border: none !important;
             box-shadow: none !important;
-            color: #0f172a !important;
-            font-size: 52px !important;
-            font-weight: 800 !important;
-            line-height: 1 !important;
-            padding: 0 0 8px 0 !important;
+            color: #1d4ed8 !important;
+            font-size: 13px !important;
+            font-weight: 700 !important;
+            line-height: 1.2 !important;
+            padding: 2px 0 0 0 !important;
             min-height: auto !important;
-            font-family: Georgia, "Times New Roman", serif !important;
             justify-content: flex-start !important;
+            text-decoration: underline !important;
         }
         .st-key-task8_view_Deployable_Candidates button:hover,
         .st-key-task8_view_Progressing_Candidates button:hover,
         .st-key-task8_view_Basic_Competency button:hover,
         .st-key-task8_view_Critical_Intervention button:hover {
-            color: #1d4ed8 !important;
+            color: #1e40af !important;
         }
         .pmq-signal-card {
             background: linear-gradient(180deg, #ffffff 0%, #fbfcfe 100%);
@@ -742,15 +732,14 @@ def run() -> None:
     card_cols = st.columns(4)
     for col, bucket in zip(card_cols, QUADRANT_ORDER):
         with col:
-            clicked = _render_primary_card(
+            _render_primary_card(
                 bucket,
                 int(counts.get(bucket, 0)),
                 (counts.get(bucket, 0) / total) if total else 0,
                 QUADRANT_DESCRIPTIONS[bucket],
                 QUADRANT_COLORS[bucket],
-                f"task8_view_{bucket.replace(' ', '_')}",
             )
-            if clicked:
+            if st.button("View details", key=f"task8_view_{bucket.replace(' ', '_')}", use_container_width=False):
                 bucket_df = filtered_roster[filtered_roster["Quadrant"].astype(str) == bucket].copy()
                 _show_bucket_dialog(bucket, bucket_df)
 
