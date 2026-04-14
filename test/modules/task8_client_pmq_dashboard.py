@@ -58,6 +58,7 @@ def _load_payload(path: Path) -> dict:
         "plot": _load_sheet(path, "quadrant_plot_data"),
         "roster": _load_sheet(path, "executive_roster"),
         "jecrc_batch": _load_sheet(path, "jecrc_batch_performance"),
+        "galgotias_batch": _load_sheet(path, "galgotias_batch_performance"),
     }
 
 
@@ -101,6 +102,64 @@ def _resolve_average(primary_value: object, *fallback_values: object) -> float |
         if numeric > 0:
             return numeric
     return resolved
+
+
+def _build_batch_attendance_frame(
+    selected_college: str,
+    selected_batch: str,
+    filtered_roster: pd.DataFrame,
+    jecrc_batch_df: pd.DataFrame,
+    galgotias_batch_df: pd.DataFrame,
+) -> pd.DataFrame:
+    published_df = pd.DataFrame()
+    if selected_college == "JECRC" and not jecrc_batch_df.empty:
+        published_df = jecrc_batch_df.copy()
+    elif selected_college == "Galgotias" and not galgotias_batch_df.empty:
+        published_df = galgotias_batch_df.copy()
+
+    required_cols = {"Assigned Batch", "Student Count", "Average Attendance %", "Average Overall Performance Score"}
+    if not published_df.empty and required_cols.issubset(set(published_df.columns)):
+        if selected_batch != "All Batches":
+            published_df = published_df[published_df["Assigned Batch"].astype(str) == selected_batch].copy()
+        published_df = _coerce_numeric(
+            published_df,
+            ["Student Count", "Average Attendance %", "Average Overall Performance Score"],
+        )
+        published_df = published_df.rename(
+            columns={
+                "Student Count": "Students",
+                "Average Overall Performance Score": "Average Overall Performance",
+            }
+        )
+        published_df["Average Performance Score"] = pd.NA
+        if not filtered_roster.empty and {"Assigned Batch", "Performance Score"} <= set(filtered_roster.columns):
+            performance_lookup = filtered_roster.groupby("Assigned Batch", dropna=False)["Performance Score"].mean().round(1)
+            published_df["Average Performance Score"] = published_df["Assigned Batch"].map(performance_lookup)
+        return published_df
+
+    if filtered_roster.empty:
+        return pd.DataFrame(
+            columns=["Assigned Batch", "Students", "Average Attendance %", "Average Overall Performance", "Average Performance Score"]
+        )
+
+    derived_df = (
+        filtered_roster.groupby("Assigned Batch", dropna=False)
+        .agg(
+            Students=("Superset ID", "count"),
+            Average_Attendance=("Attendance %", "mean"),
+            Average_Overall=("Overall Performance Score", "mean"),
+            Average_Performance=("Performance Score", "mean"),
+        )
+        .reset_index()
+        .rename(
+            columns={
+                "Average_Attendance": "Average Attendance %",
+                "Average_Overall": "Average Overall Performance",
+                "Average_Performance": "Average Performance Score",
+            }
+        )
+    )
+    return derived_df
 
 
 def _coerce_numeric(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
@@ -546,6 +605,7 @@ def run() -> None:
     integrity_df = payload["integrity"]
     insights_df = payload["insights"]
     jecrc_batch_df = payload["jecrc_batch"]
+    galgotias_batch_df = payload["galgotias_batch"]
     plot_df = _coerce_numeric(payload["plot"], TRACKER_COLUMNS)
     roster_df = _coerce_numeric(payload["roster"], TRACKER_COLUMNS)
 
@@ -837,52 +897,20 @@ def run() -> None:
             """,
             unsafe_allow_html=True,
         )
-        use_published_jecrc_batch = (
-            not jecrc_batch_df.empty
-            and selected_college in {"All Colleges", "JECRC"}
-            and {"Assigned Batch", "Student Count", "Average Attendance %", "Average Overall Performance Score"} <= set(jecrc_batch_df.columns)
+
+        batch_attendance_df = _build_batch_attendance_frame(
+            selected_college,
+            selected_batch,
+            filtered_roster,
+            jecrc_batch_df,
+            galgotias_batch_df,
         )
-        if use_published_jecrc_batch:
-            batch_attendance_df = jecrc_batch_df.copy()
-            if selected_batch != "All Batches":
-                batch_attendance_df = batch_attendance_df[
-                    batch_attendance_df["Assigned Batch"].astype(str) == selected_batch
-                ].copy()
-            batch_attendance_df = _coerce_numeric(
-                batch_attendance_df,
-                ["Student Count", "Average Attendance %", "Average Overall Performance Score"],
-            )
-            batch_attendance_df["Average Performance Score"] = pd.NA
-            if not filtered_roster.empty and {"Assigned Batch", "Performance Score"} <= set(filtered_roster.columns):
-                performance_lookup = (
-                    filtered_roster.groupby("Assigned Batch", dropna=False)["Performance Score"]
-                    .mean()
-                    .round(1)
-                )
-                batch_attendance_df["Average Performance Score"] = batch_attendance_df["Assigned Batch"].map(performance_lookup)
-            batch_attendance_df = batch_attendance_df.rename(columns={"Student Count": "Students"})
+        if batch_attendance_df.empty:
+            st.info("No batch-level attendance data is available for the current selection.")
         else:
-            batch_attendance_df = (
-                filtered_roster.groupby("Assigned Batch", dropna=False)
-                .agg(
-                    Students=("Superset ID", "count"),
-                    Average_Attendance=("Attendance %", "mean"),
-                    Average_Overall=("Overall Performance Score", "mean"),
-                    Average_Performance=("Performance Score", "mean"),
-                )
-                .reset_index()
-                .rename(
-                    columns={
-                        "Average_Attendance": "Average Attendance %",
-                        "Average_Overall": "Average Overall Performance",
-                        "Average_Performance": "Average Performance Score",
-                    }
-                )
-            )
-        if not batch_attendance_df.empty:
-            batch_attendance_df["Average Attendance %"] = batch_attendance_df["Average Attendance %"].round(1)
-            batch_attendance_df["Average Overall Performance"] = batch_attendance_df["Average Overall Performance"].round(1)
-            batch_attendance_df["Average Performance Score"] = batch_attendance_df["Average Performance Score"].round(1)
+            for col in ["Average Attendance %", "Average Overall Performance", "Average Performance Score"]:
+                if col in batch_attendance_df.columns:
+                    batch_attendance_df[col] = pd.to_numeric(batch_attendance_df[col], errors="coerce").round(1)
 
             batch_left, batch_right = st.columns([1.05, 1])
             with batch_left:
@@ -908,13 +936,14 @@ def run() -> None:
                 st.plotly_chart(fig_batch_attendance, use_container_width=True)
 
             with batch_right:
+                compare_df = batch_attendance_df.melt(
+                    id_vars=["Assigned Batch"],
+                    value_vars=[col for col in ["Average Overall Performance", "Average Performance Score"] if col in batch_attendance_df.columns],
+                    var_name="Metric",
+                    value_name="Average Score",
+                )
                 fig_batch_compare = px.bar(
-                    batch_attendance_df.melt(
-                        id_vars=["Assigned Batch"],
-                        value_vars=["Average Overall Performance", "Average Performance Score"],
-                        var_name="Metric",
-                        value_name="Average Score",
-                    ),
+                    compare_df,
                     x="Assigned Batch",
                     y="Average Score",
                     color="Metric",
@@ -948,8 +977,6 @@ def run() -> None:
                 unsafe_allow_html=True,
             )
             st.dataframe(batch_attendance_df, use_container_width=True, hide_index=True)
-        else:
-            st.info("No batch-level attendance data is available for the current selection.")
 
     with signals_tab:
         left_col, right_col = st.columns([1, 1.1])
