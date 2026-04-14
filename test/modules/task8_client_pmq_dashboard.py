@@ -57,6 +57,7 @@ def _load_payload(path: Path) -> dict:
         "candidate_map": _load_sheet(path, "metric_candidate_map"),
         "plot": _load_sheet(path, "quadrant_plot_data"),
         "roster": _load_sheet(path, "executive_roster"),
+        "jecrc_batch": _load_sheet(path, "jecrc_batch_performance"),
     }
 
 
@@ -544,6 +545,7 @@ def run() -> None:
     counts_df = payload["counts"]
     integrity_df = payload["integrity"]
     insights_df = payload["insights"]
+    jecrc_batch_df = payload["jecrc_batch"]
     plot_df = _coerce_numeric(payload["plot"], TRACKER_COLUMNS)
     roster_df = _coerce_numeric(payload["roster"], TRACKER_COLUMNS)
 
@@ -835,23 +837,48 @@ def run() -> None:
             """,
             unsafe_allow_html=True,
         )
-        batch_attendance_df = (
-            filtered_roster.groupby("Assigned Batch", dropna=False)
-            .agg(
-                Students=("Superset ID", "count"),
-                Average_Attendance=("Attendance %", "mean"),
-                Average_Overall=("Overall Performance Score", "mean"),
-                Average_Performance=("Performance Score", "mean"),
-            )
-            .reset_index()
-            .rename(
-                columns={
-                    "Average_Attendance": "Average Attendance %",
-                    "Average_Overall": "Average Overall Performance",
-                    "Average_Performance": "Average Performance Score",
-                }
-            )
+        use_published_jecrc_batch = (
+            not jecrc_batch_df.empty
+            and selected_college in {"All Colleges", "JECRC"}
+            and {"Assigned Batch", "Student Count", "Average Attendance %", "Average Overall Performance Score"} <= set(jecrc_batch_df.columns)
         )
+        if use_published_jecrc_batch:
+            batch_attendance_df = jecrc_batch_df.copy()
+            if selected_batch != "All Batches":
+                batch_attendance_df = batch_attendance_df[
+                    batch_attendance_df["Assigned Batch"].astype(str) == selected_batch
+                ].copy()
+            batch_attendance_df = _coerce_numeric(
+                batch_attendance_df,
+                ["Student Count", "Average Attendance %", "Average Overall Performance Score"],
+            )
+            batch_attendance_df["Average Performance Score"] = pd.NA
+            if not filtered_roster.empty and {"Assigned Batch", "Performance Score"} <= set(filtered_roster.columns):
+                performance_lookup = (
+                    filtered_roster.groupby("Assigned Batch", dropna=False)["Performance Score"]
+                    .mean()
+                    .round(1)
+                )
+                batch_attendance_df["Average Performance Score"] = batch_attendance_df["Assigned Batch"].map(performance_lookup)
+            batch_attendance_df = batch_attendance_df.rename(columns={"Student Count": "Students"})
+        else:
+            batch_attendance_df = (
+                filtered_roster.groupby("Assigned Batch", dropna=False)
+                .agg(
+                    Students=("Superset ID", "count"),
+                    Average_Attendance=("Attendance %", "mean"),
+                    Average_Overall=("Overall Performance Score", "mean"),
+                    Average_Performance=("Performance Score", "mean"),
+                )
+                .reset_index()
+                .rename(
+                    columns={
+                        "Average_Attendance": "Average Attendance %",
+                        "Average_Overall": "Average Overall Performance",
+                        "Average_Performance": "Average Performance Score",
+                    }
+                )
+            )
         if not batch_attendance_df.empty:
             batch_attendance_df["Average Attendance %"] = batch_attendance_df["Average Attendance %"].round(1)
             batch_attendance_df["Average Overall Performance"] = batch_attendance_df["Average Overall Performance"].round(1)
