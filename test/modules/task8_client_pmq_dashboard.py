@@ -38,6 +38,15 @@ TRACKER_COLUMNS = [
     "Assignment GitHub Weeks",
     "Top Brains Weeks",
 ]
+DRILLDOWN_COLUMNS = [
+    "Superset ID",
+    "Candidate Name",
+    "College",
+    "Assigned Batch",
+    "Performance Score",
+    "Overall Performance Score",
+    "Quadrant",
+]
 
 
 def _load_sheet(path: Path, sheet_name: str) -> pd.DataFrame:
@@ -104,6 +113,19 @@ def _resolve_average(primary_value: object, *fallback_values: object) -> float |
     return resolved
 
 
+def _batch_sort_key(batch_name: object) -> tuple[int, str]:
+    text = str(batch_name or "").strip()
+    if text.startswith("Batch "):
+        parts = text.split("-", 1)
+        prefix = parts[0].strip()
+        try:
+            number = int(prefix.replace("Batch", "").strip())
+            return (number, text.lower())
+        except ValueError:
+            pass
+    return (999, text.lower())
+
+
 def _build_batch_attendance_frame(
     selected_college: str,
     selected_batch: str,
@@ -135,6 +157,8 @@ def _build_batch_attendance_frame(
         if not filtered_roster.empty and {"Assigned Batch", "Performance Score"} <= set(filtered_roster.columns):
             performance_lookup = filtered_roster.groupby("Assigned Batch", dropna=False)["Performance Score"].mean().round(1)
             published_df["Average Performance Score"] = published_df["Assigned Batch"].map(performance_lookup)
+        published_df["__sort_key"] = published_df["Assigned Batch"].apply(_batch_sort_key)
+        published_df = published_df.sort_values(by="__sort_key").drop(columns="__sort_key").reset_index(drop=True)
         return published_df
 
     if filtered_roster.empty:
@@ -159,6 +183,8 @@ def _build_batch_attendance_frame(
             }
         )
     )
+    derived_df["__sort_key"] = derived_df["Assigned Batch"].apply(_batch_sort_key)
+    derived_df = derived_df.sort_values(by="__sort_key").drop(columns="__sort_key").reset_index(drop=True)
     return derived_df
 
 
@@ -351,6 +377,27 @@ def _render_context_chip(label: str, value: str) -> None:
     )
 
 
+@st.dialog("Candidate Details")
+def _show_bucket_dialog(bucket: str, bucket_df: pd.DataFrame) -> None:
+    st.markdown(f"**{bucket}**")
+    st.caption("Current filtered candidate view for the selected performance bucket.")
+    if bucket_df.empty:
+        st.info("No candidates are available in this bucket for the current selection.")
+        return
+
+    display_columns = [column for column in DRILLDOWN_COLUMNS if column in bucket_df.columns]
+    dialog_df = bucket_df[display_columns].copy().fillna("N/A")
+    st.dataframe(dialog_df, use_container_width=True, hide_index=True)
+    csv_data = dialog_df.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        "Download Bucket View",
+        data=csv_data,
+        file_name=f"{bucket.lower().replace(' ', '_')}_candidates.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
+
 def run() -> None:
     st.markdown(
         """
@@ -505,6 +552,7 @@ def run() -> None:
             box-shadow: 0 18px 32px rgba(15, 23, 42, 0.05);
             padding: 22px 24px;
             margin-bottom: 18px;
+            min-height: 136px;
         }
         .pmq-panel-title {
             color: #0f172a;
@@ -630,6 +678,10 @@ def run() -> None:
         selected_college = st.selectbox("College", colleges, key="task8_college_filter")
     scoped_batch_df = roster_df if selected_college == "All Colleges" else roster_df[roster_df["College"].astype(str) == selected_college]
     batches = ["All Batches"] + sorted(scoped_batch_df["Assigned Batch"].dropna().astype(str).unique().tolist())
+    batches = ["All Batches"] + sorted(
+        scoped_batch_df["Assigned Batch"].dropna().astype(str).unique().tolist(),
+        key=_batch_sort_key,
+    )
     with filter_cols[1]:
         selected_batch = st.selectbox("Batch", batches, key="task8_batch_filter")
     with filter_cols[2]:
@@ -652,14 +704,6 @@ def run() -> None:
 
     if filtered_roster.empty:
         st.warning("No candidates match the current selection.")
-        with open(REPORT_PATH, "rb") as report_handle:
-            st.download_button(
-                "Download Published PMQ Workbook",
-                data=report_handle.read(),
-                file_name=REPORT_PATH.name,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-            )
         return
 
     counts = filtered_roster["Quadrant"].value_counts()
@@ -677,10 +721,10 @@ def run() -> None:
     action_cols = st.columns(4)
     for col, bucket in zip(action_cols, QUADRANT_ORDER):
         with col:
-            if st.button(f"View {bucket.split()[0]}", key=f"task8_view_{bucket}", use_container_width=True):
-                st.session_state["task8_bucket_filter"] = bucket
-                st.session_state["task8_focus_bucket"] = bucket
-                st.rerun()
+            bucket_count = int(counts.get(bucket, 0))
+            if st.button(str(bucket_count), key=f"task8_view_{bucket}", use_container_width=True):
+                bucket_df = filtered_roster[filtered_roster["Quadrant"].astype(str) == bucket].copy()
+                _show_bucket_dialog(bucket, bucket_df)
 
     avg_assessment = filtered_roster["Assessment Composite Score"].mean()
     avg_assignment = filtered_roster["Assignment GitHub Score"].mean()
@@ -880,15 +924,14 @@ def run() -> None:
             """,
             unsafe_allow_html=True,
         )
-        snapshot_cols = st.columns(6)
         snapshot_cards = [
             ("Published Students", str(summary.get("Total Students", "N/A")), "Workbook-level population in the published report."),
             ("Assessment Composite", str(summary.get("Average Assessment Composite Score", "N/A")), "Published workbook average."),
             ("Assignment GitHub", str(summary.get("Average Assignment GitHub Score", "N/A")), "Published workbook average."),
-            ("Attendance", str(summary.get("Average Attendance %", "N/A")), "Published workbook average."),
             ("Trainer Feedback", str(summary.get("Average Trainer Feedback Score", "N/A")), "Published workbook average."),
             ("Overall Score", str(summary.get("Average Overall Performance Score", "N/A")), "Published workbook average."),
         ]
+        snapshot_cols = st.columns(len(snapshot_cards))
         for col, (title, value, detail) in zip(snapshot_cols, snapshot_cards):
             with col:
                 _render_signal_card(title, value, detail)
@@ -917,10 +960,29 @@ def run() -> None:
             for col in ["Average Attendance %", "Average Overall Performance", "Average Performance Score"]:
                 if col in batch_attendance_df.columns:
                     batch_attendance_df[col] = pd.to_numeric(batch_attendance_df[col], errors="coerce").round(1)
+            batch_attendance_df = batch_attendance_df.rename(
+                columns={"Average Overall Performance": "Average Overall Performance Score"}
+            )
+            table_columns = [
+                column
+                for column in [
+                    "Assigned Batch",
+                    "Students",
+                    "Average Attendance %",
+                    "Average Performance Score",
+                    "Average Overall Performance Score",
+                ]
+                if column in batch_attendance_df.columns
+            ]
+            batch_attendance_df = batch_attendance_df[table_columns].copy()
 
             compare_df = batch_attendance_df.melt(
                 id_vars=["Assigned Batch"],
-                value_vars=[col for col in ["Average Attendance %", "Average Performance Score"] if col in batch_attendance_df.columns],
+                value_vars=[
+                    col
+                    for col in ["Average Attendance %", "Average Performance Score"]
+                    if col in batch_attendance_df.columns
+                ],
                 var_name="Metric",
                 value_name="Average Score",
             )
@@ -959,7 +1021,7 @@ def run() -> None:
                 """
                 <div class="pmq-panel" style="margin-top:16px;">
                     <div class="pmq-panel-title">Batch Summary Table</div>
-                    <div class="pmq-panel-subtitle">Quick comparison of attendance strength and performance progress by batch.</div>
+                    <div class="pmq-panel-subtitle">Sorted batch view with attendance, performance, and overall outcome in one place.</div>
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -1111,10 +1173,6 @@ def run() -> None:
             """,
             unsafe_allow_html=True,
         )
-        focus_bucket = st.session_state.pop("task8_focus_bucket", None)
-        if focus_bucket:
-            st.info(f"Showing key candidate columns for {focus_bucket}.")
-
         using_published_candidate_map = (
             selected_college == "All Colleges"
             and selected_batch == "All Batches"
@@ -1171,12 +1229,3 @@ def run() -> None:
             ]
             display_columns = [column for column in preferred_columns if column in filtered_roster.columns]
             st.dataframe(filtered_roster[display_columns].fillna("N/A"), use_container_width=True, hide_index=True)
-
-    with open(REPORT_PATH, "rb") as report_handle:
-        st.download_button(
-            "Download Published PMQ Workbook",
-            data=report_handle.read(),
-            file_name=REPORT_PATH.name,
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-        )
