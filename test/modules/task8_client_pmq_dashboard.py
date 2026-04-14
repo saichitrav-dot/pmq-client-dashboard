@@ -364,18 +364,6 @@ def _render_signal_card(title: str, value: str, detail: str) -> None:
     )
 
 
-def _render_context_chip(label: str, value: str) -> None:
-    st.markdown(
-        f"""
-        <div class="pmq-chip">
-            <span class="pmq-chip-label">{label}</span>
-            <span class="pmq-chip-value">{value}</span>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
 @st.dialog("Candidate Details", width="large")
 def _show_bucket_dialog(bucket: str, bucket_df: pd.DataFrame) -> None:
     st.markdown(f"**{bucket}**")
@@ -435,29 +423,6 @@ def run() -> None:
             line-height: 1.75;
             max-width: 980px;
             margin-bottom: 18px;
-        }
-        .pmq-chip {
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
-            margin: 8px 10px 0 0;
-            padding: 10px 14px;
-            border-radius: 999px;
-            background: rgba(255,255,255,0.09);
-            border: 1px solid rgba(255,255,255,0.08);
-            color: #f8fafc;
-        }
-        .pmq-chip-label {
-            font-size: 12px;
-            text-transform: uppercase;
-            letter-spacing: 1px;
-            color: #bfdbfe;
-            font-weight: 700;
-        }
-        .pmq-chip-value {
-            font-size: 13px;
-            color: #ffffff;
-            font-weight: 700;
         }
         .pmq-filter-wrap {
             background: linear-gradient(180deg, #ffffff 0%, #fbfcfe 100%);
@@ -523,13 +488,18 @@ def run() -> None:
             border: none !important;
             box-shadow: none !important;
             color: #1d4ed8 !important;
-            font-size: 13px !important;
+            font-size: 20px !important;
             font-weight: 700 !important;
             line-height: 1.2 !important;
-            padding: 2px 0 0 0 !important;
+            padding: 0 !important;
             min-height: auto !important;
-            justify-content: flex-start !important;
-            text-decoration: underline !important;
+            min-width: auto !important;
+            justify-content: center !important;
+            text-decoration: none !important;
+            position: relative !important;
+            top: -220px !important;
+            left: calc(100% - 34px) !important;
+            z-index: 10 !important;
         }
         .st-key-task8_view_Deployable_Candidates button:hover,
         .st-key-task8_view_Progressing_Candidates button:hover,
@@ -713,16 +683,6 @@ def run() -> None:
     filtered_roster = _filter_frame(roster_df, selected_college, selected_batch, selected_quadrant, search_text)
     filtered_plot = _filter_frame(plot_df, selected_college, selected_batch, selected_quadrant, search_text)
 
-    chip_cols = st.columns(4)
-    with chip_cols[0]:
-        _render_context_chip("Current View", f"{selected_college} | {selected_batch}")
-    with chip_cols[1]:
-        _render_context_chip("Population", str(len(filtered_roster)))
-    with chip_cols[2]:
-        _render_context_chip("Weighted Model", str(summary.get("Weighted Model", "Published workbook")))
-    with chip_cols[3]:
-        _render_context_chip("Bucket Basis", str(summary.get("Quadrant Bucket Basis", "Performance grade bands")))
-
     if filtered_roster.empty:
         st.warning("No candidates match the current selection.")
         return
@@ -739,7 +699,7 @@ def run() -> None:
                 QUADRANT_DESCRIPTIONS[bucket],
                 QUADRANT_COLORS[bucket],
             )
-            if st.button("View details", key=f"task8_view_{bucket.replace(' ', '_')}", use_container_width=False):
+            if st.button("↗", key=f"task8_view_{bucket.replace(' ', '_')}", use_container_width=False):
                 bucket_df = filtered_roster[filtered_roster["Quadrant"].astype(str) == bucket].copy()
                 _show_bucket_dialog(bucket, bucket_df)
 
