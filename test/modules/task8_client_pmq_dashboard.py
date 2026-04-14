@@ -674,6 +674,13 @@ def run() -> None:
                 QUADRANT_DESCRIPTIONS[bucket],
                 QUADRANT_COLORS[bucket],
             )
+    action_cols = st.columns(4)
+    for col, bucket in zip(action_cols, QUADRANT_ORDER):
+        with col:
+            if st.button(f"View {bucket.split()[0]}", key=f"task8_view_{bucket}", use_container_width=True):
+                st.session_state["task8_bucket_filter"] = bucket
+                st.session_state["task8_focus_bucket"] = bucket
+                st.rerun()
 
     avg_assessment = filtered_roster["Assessment Composite Score"].mean()
     avg_assignment = filtered_roster["Assignment GitHub Score"].mean()
@@ -690,14 +697,13 @@ def run() -> None:
         summary.get("Average Trainer Feedback Score"),
     )
 
-    signal_cols = st.columns(6)
+    signal_cols = st.columns(5)
     signal_data = [
         ("Current View Size", f"{len(filtered_roster)}", "Students included after filters."),
         ("Avg Performance", _format_value(avg_performance), "The score that drives the performance bucket."),
         ("Avg Overall", _format_value(avg_overall), "Full weighted outcome from the published PMQ model."),
         ("Assessment Composite", _format_value(avg_assessment), "Average of GitHub assessment and Top Brains signals."),
         ("Assignment GitHub", _format_value(avg_assignment), "Average assignment execution score in the current view."),
-        ("Attendance / Feedback", f"{_format_value(avg_attendance)} / {_format_value(avg_feedback)}", "Attendance and trainer signals in the current selection."),
     ]
     for col, (title, value, detail) in zip(signal_cols, signal_data):
         with col:
@@ -892,7 +898,7 @@ def run() -> None:
             """
             <div class="pmq-panel">
                 <div class="pmq-panel-title">Batch-wise Attendance Progress</div>
-                <div class="pmq-panel-subtitle">Attendance and overall performance by batch for the current selection. This helps compare delivery discipline and outcome quality side by side.</div>
+                <div class="pmq-panel-subtitle">Attendance and performance progress by batch for the current selection.</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -912,66 +918,48 @@ def run() -> None:
                 if col in batch_attendance_df.columns:
                     batch_attendance_df[col] = pd.to_numeric(batch_attendance_df[col], errors="coerce").round(1)
 
-            batch_left, batch_right = st.columns([1.05, 1])
-            with batch_left:
-                fig_batch_attendance = px.bar(
-                    batch_attendance_df,
-                    x="Assigned Batch",
-                    y="Average Attendance %",
-                    color="Assigned Batch",
-                    text="Average Attendance %",
-                    color_discrete_sequence=["#1d4ed8", "#7c3aed", "#0ea5e9", "#10b981", "#f59e0b", "#ef4444"],
-                )
-                fig_batch_attendance.update_traces(texttemplate="%{text:.1f}", textposition="outside")
-                fig_batch_attendance.update_layout(
-                    height=420,
-                    showlegend=False,
-                    paper_bgcolor="white",
-                    plot_bgcolor="white",
-                    margin=dict(l=10, r=10, t=10, b=40),
-                    xaxis_title="Batch",
-                    yaxis_title="Average Attendance %",
-                )
-                fig_batch_attendance.update_yaxes(range=[0, 100])
-                st.plotly_chart(fig_batch_attendance, use_container_width=True)
-
-            with batch_right:
-                compare_df = batch_attendance_df.melt(
-                    id_vars=["Assigned Batch"],
-                    value_vars=[col for col in ["Average Overall Performance", "Average Performance Score"] if col in batch_attendance_df.columns],
-                    var_name="Metric",
-                    value_name="Average Score",
-                )
-                fig_batch_compare = px.bar(
-                    compare_df,
-                    x="Assigned Batch",
-                    y="Average Score",
-                    color="Metric",
-                    barmode="group",
-                    text="Average Score",
-                    color_discrete_map={
-                        "Average Overall Performance": "#0f172a",
-                        "Average Performance Score": "#12b981",
-                    },
-                )
-                fig_batch_compare.update_traces(texttemplate="%{text:.1f}", textposition="outside")
-                fig_batch_compare.update_layout(
-                    height=420,
-                    paper_bgcolor="white",
-                    plot_bgcolor="white",
-                    margin=dict(l=10, r=10, t=10, b=40),
-                    xaxis_title="Batch",
-                    yaxis_title="Average Score",
-                    legend_title="",
-                )
-                fig_batch_compare.update_yaxes(range=[0, 100])
-                st.plotly_chart(fig_batch_compare, use_container_width=True)
+            compare_df = batch_attendance_df.melt(
+                id_vars=["Assigned Batch"],
+                value_vars=[col for col in ["Average Attendance %", "Average Performance Score"] if col in batch_attendance_df.columns],
+                var_name="Metric",
+                value_name="Average Score",
+            )
+            compare_df["Metric"] = compare_df["Metric"].replace(
+                {
+                    "Average Attendance %": "Attendance Progress",
+                    "Average Performance Score": "Performance Progress",
+                }
+            )
+            fig_batch_compare = px.bar(
+                compare_df,
+                x="Assigned Batch",
+                y="Average Score",
+                color="Metric",
+                barmode="group",
+                text="Average Score",
+                color_discrete_map={
+                    "Attendance Progress": "#1d4ed8",
+                    "Performance Progress": "#12b981",
+                },
+            )
+            fig_batch_compare.update_traces(texttemplate="%{text:.1f}", textposition="outside")
+            fig_batch_compare.update_layout(
+                height=460,
+                paper_bgcolor="white",
+                plot_bgcolor="white",
+                margin=dict(l=10, r=10, t=10, b=40),
+                xaxis_title="Batch",
+                yaxis_title="Average Score",
+                legend_title="",
+            )
+            fig_batch_compare.update_yaxes(range=[0, 100])
+            st.plotly_chart(fig_batch_compare, use_container_width=True)
 
             st.markdown(
                 """
                 <div class="pmq-panel" style="margin-top:16px;">
                     <div class="pmq-panel-title">Batch Summary Table</div>
-                    <div class="pmq-panel-subtitle">Quick comparison of attendance strength and performance outcome by batch.</div>
+                    <div class="pmq-panel-subtitle">Quick comparison of attendance strength and performance progress by batch.</div>
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -1123,6 +1111,9 @@ def run() -> None:
             """,
             unsafe_allow_html=True,
         )
+        focus_bucket = st.session_state.pop("task8_focus_bucket", None)
+        if focus_bucket:
+            st.info(f"Showing key candidate columns for {focus_bucket}.")
 
         using_published_candidate_map = (
             selected_college == "All Colleges"
