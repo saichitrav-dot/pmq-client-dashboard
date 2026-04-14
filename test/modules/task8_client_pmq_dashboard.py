@@ -641,7 +641,9 @@ def run() -> None:
         with col:
             _render_signal_card(title, value, detail)
 
-    overview_tab, signals_tab, candidates_tab = st.tabs(["Overview", "Signals & Insights", "Candidate Drilldown"])
+    overview_tab, attendance_tab, signals_tab, candidates_tab = st.tabs(
+        ["Overview", "Batch Attendance", "Signals & Insights", "Candidate Drilldown"]
+    )
 
     with overview_tab:
         top_left, top_right = st.columns([1.05, 1])
@@ -822,6 +824,105 @@ def run() -> None:
         for col, (title, value, detail) in zip(snapshot_cols, snapshot_cards):
             with col:
                 _render_signal_card(title, value, detail)
+
+    with attendance_tab:
+        st.markdown(
+            """
+            <div class="pmq-panel">
+                <div class="pmq-panel-title">Batch-wise Attendance Progress</div>
+                <div class="pmq-panel-subtitle">Attendance and overall performance by batch for the current selection. This helps compare delivery discipline and outcome quality side by side.</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        batch_attendance_df = (
+            filtered_roster.groupby("Assigned Batch", dropna=False)
+            .agg(
+                Students=("Superset ID", "count"),
+                Average_Attendance=("Attendance %", "mean"),
+                Average_Overall=("Overall Performance Score", "mean"),
+                Average_Performance=("Performance Score", "mean"),
+            )
+            .reset_index()
+            .rename(
+                columns={
+                    "Average_Attendance": "Average Attendance %",
+                    "Average_Overall": "Average Overall Performance",
+                    "Average_Performance": "Average Performance Score",
+                }
+            )
+        )
+        if not batch_attendance_df.empty:
+            batch_attendance_df["Average Attendance %"] = batch_attendance_df["Average Attendance %"].round(1)
+            batch_attendance_df["Average Overall Performance"] = batch_attendance_df["Average Overall Performance"].round(1)
+            batch_attendance_df["Average Performance Score"] = batch_attendance_df["Average Performance Score"].round(1)
+
+            batch_left, batch_right = st.columns([1.05, 1])
+            with batch_left:
+                fig_batch_attendance = px.bar(
+                    batch_attendance_df,
+                    x="Assigned Batch",
+                    y="Average Attendance %",
+                    color="Assigned Batch",
+                    text="Average Attendance %",
+                    color_discrete_sequence=["#1d4ed8", "#7c3aed", "#0ea5e9", "#10b981", "#f59e0b", "#ef4444"],
+                )
+                fig_batch_attendance.update_traces(texttemplate="%{text:.1f}", textposition="outside")
+                fig_batch_attendance.update_layout(
+                    height=420,
+                    showlegend=False,
+                    paper_bgcolor="white",
+                    plot_bgcolor="white",
+                    margin=dict(l=10, r=10, t=10, b=40),
+                    xaxis_title="Batch",
+                    yaxis_title="Average Attendance %",
+                )
+                fig_batch_attendance.update_yaxes(range=[0, 100])
+                st.plotly_chart(fig_batch_attendance, use_container_width=True)
+
+            with batch_right:
+                fig_batch_compare = px.bar(
+                    batch_attendance_df.melt(
+                        id_vars=["Assigned Batch"],
+                        value_vars=["Average Overall Performance", "Average Performance Score"],
+                        var_name="Metric",
+                        value_name="Average Score",
+                    ),
+                    x="Assigned Batch",
+                    y="Average Score",
+                    color="Metric",
+                    barmode="group",
+                    text="Average Score",
+                    color_discrete_map={
+                        "Average Overall Performance": "#0f172a",
+                        "Average Performance Score": "#12b981",
+                    },
+                )
+                fig_batch_compare.update_traces(texttemplate="%{text:.1f}", textposition="outside")
+                fig_batch_compare.update_layout(
+                    height=420,
+                    paper_bgcolor="white",
+                    plot_bgcolor="white",
+                    margin=dict(l=10, r=10, t=10, b=40),
+                    xaxis_title="Batch",
+                    yaxis_title="Average Score",
+                    legend_title="",
+                )
+                fig_batch_compare.update_yaxes(range=[0, 100])
+                st.plotly_chart(fig_batch_compare, use_container_width=True)
+
+            st.markdown(
+                """
+                <div class="pmq-panel" style="margin-top:16px;">
+                    <div class="pmq-panel-title">Batch Summary Table</div>
+                    <div class="pmq-panel-subtitle">Quick comparison of attendance strength and performance outcome by batch.</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            st.dataframe(batch_attendance_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("No batch-level attendance data is available for the current selection.")
 
     with signals_tab:
         left_col, right_col = st.columns([1, 1.1])
