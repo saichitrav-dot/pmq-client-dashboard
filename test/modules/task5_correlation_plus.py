@@ -8,6 +8,8 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 from openpyxl.chart import BarChart, Reference
+from openpyxl.chart.series import DataPoint
+from openpyxl.chart.shapes import GraphicalProperties
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
@@ -44,6 +46,14 @@ QUADRANT_BUCKETS = {
     "C": "Basic Competency",
     "F": "Critical Intervention",
 }
+
+JECRC_BATCH_COLORS = [
+    "1D4ED8",
+    "7C3AED",
+    "0EA5E9",
+    "10B981",
+    "F59E0B",
+]
 
 PUBLISHED_REPORT_PATH = Path(__file__).resolve().parents[1] / "published_reports" / "pmq_client_dashboard.xlsx"
 
@@ -94,6 +104,31 @@ def score_to_grade(score):
 
 def performance_bucket(score):
     return QUADRANT_BUCKETS.get(score_to_grade(score), "Critical Intervention")
+
+
+def batch_sort_key(value):
+    text = str(value or "").strip()
+    match = re.search(r"\bbatch[\s\-_]*(\d+)\b", text, re.IGNORECASE)
+    if match:
+        return (0, int(match.group(1)), text.lower())
+    return (1, 9999, text.lower())
+
+
+def derive_jecrc_batch_from_language(value):
+    language = str(value or "").strip().lower()
+    if not language:
+        return ""
+    if "java" in language:
+        return "Batch 1 - JAVA Batch"
+    if "pytest" in language:
+        return "Batch 2 - Pytest Batch"
+    if "robot" in language:
+        return "Batch 3 - Robot Python"
+    if "playwright" in language:
+        return "Batch 4 - Playwright"
+    if ".net" in language or "dotnet" in language:
+        return "Batch 5 - Dotnet"
+    return ""
 
 
 def weighted_average(values):
@@ -268,13 +303,23 @@ def build_code_frame(eval_results):
     return aggregated[empty_columns]
 
 
-def build_github_track_frame(eval_results, evaluation_track, score_column, week_column, candidate_column):
+def build_github_track_frame(
+    eval_results,
+    evaluation_track,
+    score_column,
+    week_column,
+    candidate_column,
+    batch_column,
+    technology_column,
+):
     df = dataframe_from_session(eval_results)
     empty_columns = [
         "Identity_Key",
         "Superset ID",
         "Match_Name",
         candidate_column,
+        batch_column,
+        technology_column,
         score_column,
         week_column,
     ]
@@ -304,10 +349,20 @@ def build_github_track_frame(eval_results, evaluation_track, score_column, week_
         working[score_column] = working[score_column].where(evaluated_mask, np.nan)
 
     week_col = find_first_column(working, ["AssessmentWeek", "Week", "WeekLabel"])
+    assigned_batch_col = find_first_column(working, ["Assigned Batch", "Batch", "Batch Name"])
+    declared_technology_col = find_first_column(working, ["DeclaredTechnology", "Technology", "Framework", "Programming Language"])
     working["AssessmentWeek"] = working[week_col].fillna("").astype(str).str.strip() if week_col else ""
+    working[batch_column] = working[assigned_batch_col].fillna("").astype(str).str.strip() if assigned_batch_col else ""
+    working[technology_column] = (
+        working[declared_technology_col].fillna("").astype(str).str.strip() if declared_technology_col else ""
+    )
     total_uploaded_weeks = len({str(value).strip() for value in working["AssessmentWeek"] if str(value).strip()})
     working[candidate_column] = working["Candidate Name"]
-    working = working.sort_values(by=[score_column, candidate_column], ascending=[False, True], na_position="last")
+    working = working.sort_values(
+        by=[score_column, candidate_column, batch_column, technology_column],
+        ascending=[False, True, True, True],
+        na_position="last",
+    )
 
     aggregated = (
         working.groupby("Identity_Key", as_index=False)
@@ -316,12 +371,59 @@ def build_github_track_frame(eval_results, evaluation_track, score_column, week_
                 "Superset ID": first_non_empty,
                 "Match_Name": first_non_empty,
                 candidate_column: first_non_empty,
+                batch_column: first_non_empty,
+                technology_column: first_non_empty,
                 score_column: "mean",
             }
         )
     )
     aggregated[score_column] = aggregated[score_column].round(1)
     aggregated[week_column] = int(total_uploaded_weeks)
+    return aggregated[empty_columns]
+
+
+def build_dropout_override_frame(eval_results):
+    df = dataframe_from_session(eval_results)
+    empty_columns = [
+        "Identity_Key",
+        "Superset ID",
+        "Match_Name",
+        "Dropout Candidate Name",
+        "Dropout Assigned Batch",
+        "Dropout Status",
+    ]
+    if df.empty or "Status" not in df.columns:
+        return pd.DataFrame(columns=empty_columns)
+
+    working = df.copy()
+    working["Status"] = working["Status"].apply(task2_assessment.normalize_assessment_status)
+    working = working[working["Status"].eq("Drop out")].copy()
+    if working.empty:
+        return pd.DataFrame(columns=empty_columns)
+
+    name_col = find_first_column(working, ["Candidate Name", "Trainee", "Student Name"])
+    if name_col is None:
+        return pd.DataFrame(columns=empty_columns)
+    working = add_identity_fields(working, name_col, ["Superset ID", "SupersetID", "Student ID", "Candidate ID"])
+    if working.empty:
+        return pd.DataFrame(columns=empty_columns)
+
+    assigned_batch_col = find_first_column(working, ["Assigned Batch", "Batch", "Batch Name"])
+    working["Dropout Candidate Name"] = working["Candidate Name"]
+    working["Dropout Assigned Batch"] = working[assigned_batch_col].fillna("").astype(str).str.strip() if assigned_batch_col else ""
+    working["Dropout Status"] = "Drop out"
+    aggregated = (
+        working.groupby("Identity_Key", as_index=False)
+        .agg(
+            {
+                "Superset ID": first_non_empty,
+                "Match_Name": first_non_empty,
+                "Dropout Candidate Name": first_non_empty,
+                "Dropout Assigned Batch": first_non_empty,
+                "Dropout Status": first_non_empty,
+            }
+        )
+    )
     return aggregated[empty_columns]
 
 
@@ -518,12 +620,18 @@ def build_attendance_frame(att_data):
     if working.empty:
         return pd.DataFrame(columns=empty_columns)
 
-    attendance_col = find_first_column(working, ["Clean_Present_%", "Attendance %", "Present %"])
+    attendance_col = find_first_column(working, ["Clean_Present_%", "Attendance %", "Present %", "% Present"])
     college_col = find_first_column(working, ["College", "College Name", "Institute"])
     status_col = find_first_column(working, ["Standard_Status", "Status", "Student Status"])
     cohort_col = find_first_column(working, ["Cohort", "Cohort Name"])
 
-    working["Attendance %"] = pd.to_numeric(working[attendance_col], errors="coerce").fillna(0).clip(0, 100) if attendance_col else 0.0
+    if attendance_col:
+        attendance_values = pd.to_numeric(working[attendance_col], errors="coerce").fillna(0)
+        if attendance_values.max() <= 1.5:
+            attendance_values = attendance_values * 100
+        working["Attendance %"] = attendance_values.clip(0, 100)
+    else:
+        working["Attendance %"] = 0.0
     working["College"] = working[college_col].fillna("Unknown College").astype(str).str.strip() if college_col else "Unknown College"
     working["Standard_Status"] = working[status_col].fillna("Unknown").astype(str).str.strip() if status_col else "Unknown"
     working["Cohort"] = working[cohort_col].fillna("Unknown Cohort").astype(str).str.strip() if cohort_col else "Unknown Cohort"
@@ -596,10 +704,34 @@ def merge_support_data(base_df, support_df, label):
     return result
 
 
-def build_executive_frame(assessment_github_df, assignment_github_df, feedback_df, top_brains_df, attendance_df, population_scope):
+def build_executive_frame(
+    assessment_github_df,
+    assignment_github_df,
+    feedback_df,
+    top_brains_df,
+    attendance_df,
+    dropout_override_df,
+    population_scope,
+):
     attendance_base = attendance_df.copy()
     if attendance_base.empty:
         return pd.DataFrame()
+
+    if dropout_override_df is not None and not dropout_override_df.empty:
+        attendance_base = merge_support_data(attendance_base, dropout_override_df, "Dropout Override")
+        empty_text = pd.Series(index=attendance_base.index, dtype=object)
+        attendance_base["Standard_Status"] = (
+            attendance_base.get("Dropout Status", empty_text)
+            .replace("", np.nan)
+            .fillna(attendance_base.get("Standard_Status", empty_text))
+            .fillna("Unknown")
+        )
+        attendance_base["Assigned Batch"] = (
+            attendance_base.get("Dropout Assigned Batch", empty_text)
+            .replace("", np.nan)
+            .fillna(attendance_base.get("Assigned Batch", empty_text))
+            .fillna("Unknown Batch")
+        )
 
     if population_scope == "Active Only":
         active_mask = attendance_base["Standard_Status"].astype(str).str.contains("Active", case=False, na=False)
@@ -634,7 +766,30 @@ def build_executive_frame(assessment_github_df, assignment_github_df, feedback_d
         .fillna(merged_df.get("Assignment GitHub Candidate Name", empty_text))
     )
     merged_df["College"] = merged_df["College"].fillna(merged_df.get("Tracker College", empty_text)).fillna("Unknown College")
-    merged_df["Assigned Batch"] = merged_df.get("Assigned Batch", empty_text).fillna("Unknown Batch")
+    merged_df["Assigned Batch"] = (
+        merged_df.get("Assessment GitHub Assigned Batch", empty_text)
+        .replace("", np.nan)
+        .fillna(merged_df.get("Assignment GitHub Assigned Batch", empty_text).replace("", np.nan))
+        .fillna(merged_df.get("Assigned Batch", empty_text))
+        .fillna("Unknown Batch")
+    )
+    merged_df["Programming Language"] = (
+        merged_df.get("Assessment GitHub Technology", empty_text)
+        .replace("", np.nan)
+        .fillna(merged_df.get("Assignment GitHub Technology", empty_text).replace("", np.nan))
+        .fillna(merged_df.get("DeclaredTechnology", empty_text))
+        .fillna("Not Declared")
+    )
+    jecrc_mask = merged_df["College"].fillna("").astype(str).str.contains("JECRC", case=False, na=False)
+    github_batch_missing_mask = (
+        merged_df.get("Assessment GitHub Assigned Batch", empty_text).fillna("").astype(str).str.strip().eq("")
+        & merged_df.get("Assignment GitHub Assigned Batch", empty_text).fillna("").astype(str).str.strip().eq("")
+    )
+    generic_batch_mask = merged_df["Assigned Batch"].fillna("").astype(str).str.strip().str.fullmatch(r"Batch\s*\d+", case=False)
+    pending_mask = jecrc_mask & github_batch_missing_mask & generic_batch_mask
+    derived_batch_series = merged_df["Programming Language"].apply(derive_jecrc_batch_from_language)
+    merged_df.loc[pending_mask & derived_batch_series.ne(""), "Assigned Batch"] = derived_batch_series[pending_mask & derived_batch_series.ne("")]
+    merged_df.loc[pending_mask & derived_batch_series.eq(""), "Assigned Batch"] = "Batch Mapping Pending"
     merged_df["Trainer Rating"] = pd.to_numeric(merged_df.get("Trainer Rating", 0), errors="coerce").fillna(0).clip(0, 5)
     merged_df["Trainer Feedback"] = merged_df.get("Trainer Feedback", empty_text).fillna("").astype(str)
     merged_df["Trainer Feedback Score"] = (merged_df["Trainer Rating"] * 20).clip(0, 100)
@@ -787,8 +942,9 @@ def build_action_roster(df):
             "Superset ID",
             "Candidate Name",
             "College",
-            "Assigned Batch",
-            "Cohort",
+        "Assigned Batch",
+        "Programming Language",
+        "Cohort",
             "Standard_Status",
             "Attendance %",
             "Attendance Grade",
@@ -819,6 +975,7 @@ def build_action_roster_display(df):
         "Candidate Name",
         "College",
         "Assigned Batch",
+        "Programming Language",
         "Standard_Status",
         "Attendance %",
         "Attendance Grade",
@@ -936,6 +1093,7 @@ def build_dashboard_report_bytes(
         "Candidate Name",
         "College",
         "Assigned Batch",
+        "Programming Language",
         "Quadrant",
         "Performance Score",
         "Overall Performance Score",
@@ -968,6 +1126,78 @@ def build_dashboard_report_bytes(
             }
         )
     metric_candidate_map_df = pd.DataFrame(candidate_map_rows)
+
+    jecrc_batch_df = filtered_df.copy()
+    if "College" in jecrc_batch_df.columns:
+        jecrc_batch_df = jecrc_batch_df[
+            jecrc_batch_df["College"].fillna("").astype(str).str.contains("JECRC", case=False, na=False)
+        ].copy()
+    else:
+        jecrc_batch_df = pd.DataFrame()
+
+    if not jecrc_batch_df.empty:
+        jecrc_batch_summary_df = (
+            jecrc_batch_df.assign(
+                Assigned_Batch=jecrc_batch_df.get("Assigned Batch", "Unknown Batch").fillna("Unknown Batch").astype(str).str.strip(),
+                Attendance_Numeric=pd.to_numeric(jecrc_batch_df.get("Attendance %"), errors="coerce"),
+                Overall_Numeric=pd.to_numeric(jecrc_batch_df.get("Overall Performance Score"), errors="coerce"),
+            )
+            .groupby("Assigned_Batch", dropna=False)
+            .agg(
+                Student_Count=("Superset ID", "count"),
+                Average_Attendance=("Attendance_Numeric", "mean"),
+                Average_Overall_Performance=("Overall_Numeric", "mean"),
+            )
+            .reset_index()
+            .rename(columns={"Assigned_Batch": "Assigned Batch", "Student_Count": "Student Count"})
+        )
+        jecrc_batch_summary_df["Average Attendance %"] = jecrc_batch_summary_df["Average_Attendance"].round(1)
+        jecrc_batch_summary_df["Average Overall Performance Score"] = jecrc_batch_summary_df["Average_Overall_Performance"].round(1)
+        jecrc_batch_summary_df = jecrc_batch_summary_df[
+            ["Assigned Batch", "Student Count", "Average Attendance %", "Average Overall Performance Score"]
+        ]
+        jecrc_batch_summary_df["__sort_key"] = jecrc_batch_summary_df["Assigned Batch"].apply(batch_sort_key)
+        jecrc_batch_summary_df = jecrc_batch_summary_df.sort_values(by="__sort_key").drop(columns="__sort_key").reset_index(drop=True)
+    else:
+        jecrc_batch_summary_df = pd.DataFrame(
+            columns=["Assigned Batch", "Student Count", "Average Attendance %", "Average Overall Performance Score"]
+        )
+
+    galgotias_batch_df = filtered_df.copy()
+    if "College" in galgotias_batch_df.columns:
+        galgotias_batch_df = galgotias_batch_df[
+            galgotias_batch_df["College"].fillna("").astype(str).str.contains("Galgotias", case=False, na=False)
+        ].copy()
+    else:
+        galgotias_batch_df = pd.DataFrame()
+
+    if not galgotias_batch_df.empty:
+        galgotias_batch_summary_df = (
+            galgotias_batch_df.assign(
+                Assigned_Batch=galgotias_batch_df.get("Assigned Batch", "Unknown Batch").fillna("Unknown Batch").astype(str).str.strip(),
+                Attendance_Numeric=pd.to_numeric(galgotias_batch_df.get("Attendance %"), errors="coerce"),
+                Overall_Numeric=pd.to_numeric(galgotias_batch_df.get("Overall Performance Score"), errors="coerce"),
+            )
+            .groupby("Assigned_Batch", dropna=False)
+            .agg(
+                Student_Count=("Superset ID", "count"),
+                Average_Attendance=("Attendance_Numeric", "mean"),
+                Average_Overall_Performance=("Overall_Numeric", "mean"),
+            )
+            .reset_index()
+            .rename(columns={"Assigned_Batch": "Assigned Batch", "Student_Count": "Student Count"})
+        )
+        galgotias_batch_summary_df["Average Attendance %"] = galgotias_batch_summary_df["Average_Attendance"].round(1)
+        galgotias_batch_summary_df["Average Overall Performance Score"] = galgotias_batch_summary_df["Average_Overall_Performance"].round(1)
+        galgotias_batch_summary_df = galgotias_batch_summary_df[
+            ["Assigned Batch", "Student Count", "Average Attendance %", "Average Overall Performance Score"]
+        ]
+        galgotias_batch_summary_df["__sort_key"] = galgotias_batch_summary_df["Assigned Batch"].apply(batch_sort_key)
+        galgotias_batch_summary_df = galgotias_batch_summary_df.sort_values(by="__sort_key").drop(columns="__sort_key").reset_index(drop=True)
+    else:
+        galgotias_batch_summary_df = pd.DataFrame(
+            columns=["Assigned Batch", "Student Count", "Average Attendance %", "Average Overall Performance Score"]
+        )
 
     def apply_table_format(worksheet):
         worksheet.freeze_panes = "A2"
@@ -1213,6 +1443,8 @@ def build_dashboard_report_bytes(
         metric_candidate_map_df.to_excel(writer, index=False, sheet_name="metric_candidate_map")
         quadrant_plot_df.to_excel(writer, index=False, sheet_name="quadrant_plot_data")
         roster_df.to_excel(writer, index=False, sheet_name="executive_roster")
+        jecrc_batch_summary_df.to_excel(writer, index=False, sheet_name="jecrc_batch_performance")
+        galgotias_batch_summary_df.to_excel(writer, index=False, sheet_name="galgotias_batch_performance")
 
         workbook["dashboard_summary"].sheet_properties.tabColor = "1D4ED8"
         workbook["summary_data"].sheet_properties.tabColor = "2563EB"
@@ -1222,6 +1454,8 @@ def build_dashboard_report_bytes(
         workbook["metric_candidate_map"].sheet_properties.tabColor = "0EA5E9"
         workbook["quadrant_plot_data"].sheet_properties.tabColor = "64748B"
         workbook["executive_roster"].sheet_properties.tabColor = "0F172A"
+        workbook["jecrc_batch_performance"].sheet_properties.tabColor = "DC2626"
+        workbook["galgotias_batch_performance"].sheet_properties.tabColor = "2563EB"
 
         for sheet_name in [
             "summary_data",
@@ -1231,8 +1465,119 @@ def build_dashboard_report_bytes(
             "metric_candidate_map",
             "quadrant_plot_data",
             "executive_roster",
+            "jecrc_batch_performance",
+            "galgotias_batch_performance",
         ]:
             apply_table_format(workbook[sheet_name])
+
+        batch_sheet = workbook["jecrc_batch_performance"]
+        batch_sheet.sheet_view.showGridLines = False
+        batch_sheet.freeze_panes = "A2"
+        if batch_sheet.max_row <= 1:
+            batch_sheet.merge_cells("A3:D5")
+            empty_cell = batch_sheet["A3"]
+            empty_cell.value = "No JECRC batch-level data is available in the current PMQ view."
+            empty_cell.font = Font(size=12, bold=True, color="475569")
+            empty_cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        else:
+            chart_data_start_row = 2
+            chart_data_end_row = batch_sheet.max_row
+
+            attendance_chart = BarChart()
+            attendance_chart.type = "col"
+            attendance_chart.style = 10
+            attendance_chart.title = "JECRC Batch-wise Average Attendance %"
+            attendance_chart.y_axis.title = "Attendance %"
+            attendance_chart.x_axis.title = "JECRC Batches"
+            attendance_chart.height = 7.5
+            attendance_chart.width = 11
+            attendance_chart.varyColors = False
+            attendance_data = Reference(batch_sheet, min_col=3, min_row=1, max_row=chart_data_end_row)
+            attendance_categories = Reference(batch_sheet, min_col=1, min_row=2, max_row=chart_data_end_row)
+            attendance_chart.add_data(attendance_data, titles_from_data=True)
+            attendance_chart.set_categories(attendance_categories)
+            if attendance_chart.ser:
+                attendance_chart.ser[0].dPt = []
+                for idx in range(chart_data_end_row - 1):
+                    point = DataPoint(idx=idx)
+                    point.graphicalProperties = GraphicalProperties(solidFill=JECRC_BATCH_COLORS[idx % len(JECRC_BATCH_COLORS)])
+                    attendance_chart.ser[0].dPt.append(point)
+            batch_sheet.add_chart(attendance_chart, "F2")
+
+            overall_chart = BarChart()
+            overall_chart.type = "col"
+            overall_chart.style = 11
+            overall_chart.title = "JECRC Batch-wise Average Overall Performance"
+            overall_chart.y_axis.title = "Overall Performance Score"
+            overall_chart.x_axis.title = "JECRC Batches"
+            overall_chart.height = 7.5
+            overall_chart.width = 11
+            overall_chart.varyColors = False
+            overall_data = Reference(batch_sheet, min_col=4, min_row=1, max_row=chart_data_end_row)
+            overall_categories = Reference(batch_sheet, min_col=1, min_row=2, max_row=chart_data_end_row)
+            overall_chart.add_data(overall_data, titles_from_data=True)
+            overall_chart.set_categories(overall_categories)
+            if overall_chart.ser:
+                overall_chart.ser[0].dPt = []
+                for idx in range(chart_data_end_row - 1):
+                    point = DataPoint(idx=idx)
+                    point.graphicalProperties = GraphicalProperties(solidFill=JECRC_BATCH_COLORS[idx % len(JECRC_BATCH_COLORS)])
+                    overall_chart.ser[0].dPt.append(point)
+            batch_sheet.add_chart(overall_chart, "F18")
+
+        galgotias_sheet = workbook["galgotias_batch_performance"]
+        galgotias_sheet.sheet_view.showGridLines = False
+        galgotias_sheet.freeze_panes = "A2"
+        if galgotias_sheet.max_row <= 1:
+            galgotias_sheet.merge_cells("A3:D5")
+            empty_cell = galgotias_sheet["A3"]
+            empty_cell.value = "No Galgotias batch-level data is available in the current PMQ view."
+            empty_cell.font = Font(size=12, bold=True, color="475569")
+            empty_cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        else:
+            chart_data_end_row = galgotias_sheet.max_row
+
+            attendance_chart = BarChart()
+            attendance_chart.type = "col"
+            attendance_chart.style = 10
+            attendance_chart.title = "Galgotias Batch-wise Average Attendance %"
+            attendance_chart.y_axis.title = "Attendance %"
+            attendance_chart.x_axis.title = "Galgotias Batches"
+            attendance_chart.height = 7.5
+            attendance_chart.width = 11
+            attendance_chart.varyColors = False
+            attendance_data = Reference(galgotias_sheet, min_col=3, min_row=1, max_row=chart_data_end_row)
+            attendance_categories = Reference(galgotias_sheet, min_col=1, min_row=2, max_row=chart_data_end_row)
+            attendance_chart.add_data(attendance_data, titles_from_data=True)
+            attendance_chart.set_categories(attendance_categories)
+            if attendance_chart.ser:
+                attendance_chart.ser[0].dPt = []
+                for idx in range(chart_data_end_row - 1):
+                    point = DataPoint(idx=idx)
+                    point.graphicalProperties = GraphicalProperties(solidFill=JECRC_BATCH_COLORS[idx % len(JECRC_BATCH_COLORS)])
+                    attendance_chart.ser[0].dPt.append(point)
+            galgotias_sheet.add_chart(attendance_chart, "F2")
+
+            overall_chart = BarChart()
+            overall_chart.type = "col"
+            overall_chart.style = 11
+            overall_chart.title = "Galgotias Batch-wise Average Overall Performance"
+            overall_chart.y_axis.title = "Overall Performance Score"
+            overall_chart.x_axis.title = "Galgotias Batches"
+            overall_chart.height = 7.5
+            overall_chart.width = 11
+            overall_chart.varyColors = False
+            overall_data = Reference(galgotias_sheet, min_col=4, min_row=1, max_row=chart_data_end_row)
+            overall_categories = Reference(galgotias_sheet, min_col=1, min_row=2, max_row=chart_data_end_row)
+            overall_chart.add_data(overall_data, titles_from_data=True)
+            overall_chart.set_categories(overall_categories)
+            if overall_chart.ser:
+                overall_chart.ser[0].dPt = []
+                for idx in range(chart_data_end_row - 1):
+                    point = DataPoint(idx=idx)
+                    point.graphicalProperties = GraphicalProperties(solidFill=JECRC_BATCH_COLORS[idx % len(JECRC_BATCH_COLORS)])
+                    overall_chart.ser[0].dPt.append(point)
+            galgotias_sheet.add_chart(overall_chart, "F18")
 
     buffer.seek(0)
     return buffer.getvalue()
@@ -1345,6 +1690,8 @@ def run():
         "Assessment GitHub Score",
         "Assessment GitHub Weeks",
         "Assessment GitHub Candidate Name",
+        "Assessment GitHub Assigned Batch",
+        "Assessment GitHub Technology",
     )
     assignment_github_df = build_github_track_frame(
         eval_df,
@@ -1352,7 +1699,10 @@ def run():
         "Assignment GitHub Score",
         "Assignment GitHub Weeks",
         "Assignment GitHub Candidate Name",
+        "Assignment GitHub Assigned Batch",
+        "Assignment GitHub Technology",
     )
+    dropout_override_df = build_dropout_override_frame(eval_df)
 
     if attendance_df.empty:
         st.warning("The executive intelligence layer could not build a valid attendance base from the current session-state records.")
@@ -1368,6 +1718,7 @@ def run():
         feedback_df,
         top_brains_df,
         attendance_df,
+        dropout_override_df,
         selected_scope,
     )
     if merged_df.empty:

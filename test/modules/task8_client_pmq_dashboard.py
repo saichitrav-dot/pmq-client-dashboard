@@ -45,7 +45,6 @@ DRILLDOWN_COLUMNS = [
     "Assigned Batch",
     "Performance Score",
     "Overall Performance Score",
-    "Quadrant",
 ]
 
 
@@ -338,18 +337,26 @@ def _build_integrity_view(filtered_df: pd.DataFrame, integrity_df: pd.DataFrame)
     return integrity_view
 
 
-def _render_primary_card(title: str, value: int, share: float, description: str, accent: str) -> None:
+def _render_primary_card(title: str, value: int, share: float, description: str, accent: str, button_key: str) -> bool:
     st.markdown(
         f"""
         <div class="pmq-primary-card" style="--accent:{accent};">
             <div class="pmq-card-kicker">{title}</div>
-            <div class="pmq-card-value">{value}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    clicked = st.button(str(value), key=button_key, use_container_width=False)
+    st.markdown(
+        f"""
+        <div class="pmq-card-tail">
             <div class="pmq-card-share">{share:.0%} of current view</div>
             <div class="pmq-card-detail">{description}</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
+    return clicked
 
 
 def _render_signal_card(title: str, value: str, detail: str) -> None:
@@ -377,7 +384,7 @@ def _render_context_chip(label: str, value: str) -> None:
     )
 
 
-@st.dialog("Candidate Details")
+@st.dialog("Candidate Details", width="large")
 def _show_bucket_dialog(bucket: str, bucket_df: pd.DataFrame) -> None:
     st.markdown(f"**{bucket}**")
     st.caption("Current filtered candidate view for the selected performance bucket.")
@@ -485,9 +492,10 @@ def run() -> None:
             border: 1px solid #e2e8f0;
             border-top: 6px solid var(--accent);
             border-radius: 24px;
-            min-height: 218px;
-            padding: 22px 22px 18px 22px;
+            min-height: 86px;
+            padding: 22px 22px 8px 22px;
             box-shadow: 0 18px 34px rgba(15, 23, 42, 0.08);
+            margin-bottom: 4px;
         }
         .pmq-card-kicker {
             color: #0f172a;
@@ -495,15 +503,16 @@ def run() -> None:
             font-weight: 800;
             text-transform: uppercase;
             letter-spacing: 1.1px;
-            margin-bottom: 14px;
+            margin-bottom: 0;
         }
-        .pmq-card-value {
-            color: #0f172a;
-            font-size: 52px;
-            font-weight: 800;
-            line-height: 1;
-            margin-bottom: 10px;
-            font-family: Georgia, "Times New Roman", serif;
+        .pmq-card-tail {
+            background: linear-gradient(180deg, #ffffff 0%, #f9fbfd 100%);
+            border: 1px solid #e2e8f0;
+            border-top: 0;
+            border-radius: 0 0 24px 24px;
+            box-shadow: 0 18px 34px rgba(15, 23, 42, 0.08);
+            min-height: 118px;
+            padding: 2px 22px 18px 22px;
         }
         .pmq-card-share {
             color: #0f172a;
@@ -515,6 +524,28 @@ def run() -> None:
             color: #475569;
             font-size: 14px;
             line-height: 1.68;
+        }
+        .st-key-task8_view_Deployable_Candidates button,
+        .st-key-task8_view_Progressing_Candidates button,
+        .st-key-task8_view_Basic_Competency button,
+        .st-key-task8_view_Critical_Intervention button {
+            background: transparent !important;
+            border: none !important;
+            box-shadow: none !important;
+            color: #0f172a !important;
+            font-size: 52px !important;
+            font-weight: 800 !important;
+            line-height: 1 !important;
+            padding: 0 0 8px 0 !important;
+            min-height: auto !important;
+            font-family: Georgia, "Times New Roman", serif !important;
+            justify-content: flex-start !important;
+        }
+        .st-key-task8_view_Deployable_Candidates button:hover,
+        .st-key-task8_view_Progressing_Candidates button:hover,
+        .st-key-task8_view_Basic_Competency button:hover,
+        .st-key-task8_view_Critical_Intervention button:hover {
+            color: #1d4ed8 !important;
         }
         .pmq-signal-card {
             background: linear-gradient(180deg, #ffffff 0%, #fbfcfe 100%);
@@ -711,18 +742,15 @@ def run() -> None:
     card_cols = st.columns(4)
     for col, bucket in zip(card_cols, QUADRANT_ORDER):
         with col:
-            _render_primary_card(
+            clicked = _render_primary_card(
                 bucket,
                 int(counts.get(bucket, 0)),
                 (counts.get(bucket, 0) / total) if total else 0,
                 QUADRANT_DESCRIPTIONS[bucket],
                 QUADRANT_COLORS[bucket],
+                f"task8_view_{bucket.replace(' ', '_')}",
             )
-    action_cols = st.columns(4)
-    for col, bucket in zip(action_cols, QUADRANT_ORDER):
-        with col:
-            bucket_count = int(counts.get(bucket, 0))
-            if st.button(str(bucket_count), key=f"task8_view_{bucket}", use_container_width=True):
+            if clicked:
                 bucket_df = filtered_roster[filtered_roster["Quadrant"].astype(str) == bucket].copy()
                 _show_bucket_dialog(bucket, bucket_df)
 
@@ -1203,7 +1231,7 @@ def run() -> None:
                 """
                 <div class="pmq-panel">
                     <div class="pmq-panel-title">Current View Roster</div>
-                    <div class="pmq-panel-subtitle">Leadership-ready roster with the core PMQ columns preserved from the published workbook.</div>
+                    <div class="pmq-panel-subtitle">A cleaner leadership view of the current candidates with the most decision-relevant PMQ columns.</div>
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -1228,4 +1256,24 @@ def run() -> None:
                 "Quadrant",
             ]
             display_columns = [column for column in preferred_columns if column in filtered_roster.columns]
-            st.dataframe(filtered_roster[display_columns].fillna("N/A"), use_container_width=True, hide_index=True)
+            roster_view = filtered_roster[display_columns].sort_values(
+                by=["Performance Score", "Overall Performance Score"],
+                ascending=[False, False],
+            ).copy()
+            st.dataframe(
+                roster_view.fillna("N/A"),
+                use_container_width=True,
+                hide_index=True,
+                height=520,
+                column_config={
+                    "Superset ID": st.column_config.TextColumn("Superset ID"),
+                    "Candidate Name": st.column_config.TextColumn("Candidate Name"),
+                    "Assigned Batch": st.column_config.TextColumn("Assigned Batch"),
+                    "Assessment GitHub Weeks": st.column_config.NumberColumn("Assessment Weeks", format="%d"),
+                    "Assignment GitHub Weeks": st.column_config.NumberColumn("Assignment Weeks", format="%d"),
+                    "Attendance %": st.column_config.NumberColumn("Attendance %", format="%.1f"),
+                    "Trainer Feedback Score": st.column_config.NumberColumn("Trainer Feedback", format="%.1f"),
+                    "Performance Score": st.column_config.NumberColumn("Performance Score", format="%.1f"),
+                    "Overall Performance Score": st.column_config.NumberColumn("Overall Score", format="%.1f"),
+                },
+            )
