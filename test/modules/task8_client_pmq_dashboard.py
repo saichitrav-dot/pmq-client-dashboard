@@ -81,6 +81,13 @@ def _format_value(value: object, digits: int = 1) -> str:
     return f"{value:.{digits}f}"
 
 
+def _as_numeric(value: object) -> float | None:
+    numeric = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+    if pd.isna(numeric):
+        return None
+    return float(numeric)
+
+
 def _coerce_numeric(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
     result = df.copy()
     for column in columns:
@@ -598,6 +605,9 @@ def run() -> None:
     avg_overall = filtered_roster["Overall Performance Score"].mean()
     avg_attendance = filtered_roster["Attendance %"].mean()
     avg_feedback = filtered_roster["Trainer Feedback Score"].mean()
+    summary_attendance = _as_numeric(summary.get("Average Attendance %"))
+    if (pd.isna(avg_attendance) or float(avg_attendance) == 0.0) and summary_attendance is not None:
+        avg_attendance = summary_attendance
 
     signal_cols = st.columns(6)
     signal_data = [
