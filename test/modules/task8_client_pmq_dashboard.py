@@ -682,6 +682,12 @@ def run() -> None:
 
     filtered_roster = _filter_frame(roster_df, selected_college, selected_batch, selected_quadrant, search_text)
     filtered_plot = _filter_frame(plot_df, selected_college, selected_batch, selected_quadrant, search_text)
+    using_published_snapshot = (
+        selected_college == "All Colleges"
+        and selected_batch == "All Batches"
+        and selected_quadrant == "All Buckets"
+        and not search_text
+    )
 
     if filtered_roster.empty:
         st.warning("No candidates match the current selection.")
@@ -1034,7 +1040,7 @@ def run() -> None:
                         unsafe_allow_html=True,
                     )
 
-            if not counts_df.empty:
+            if using_published_snapshot and not counts_df.empty:
                 st.markdown(
                     """
                     <div class="pmq-panel" style="margin-top:18px;">
@@ -1059,13 +1065,13 @@ def run() -> None:
             st.markdown(
                 """
                 <div class="pmq-panel">
-                    <div class="pmq-panel-title">Published Insights & Current Narrative</div>
-                    <div class="pmq-panel-subtitle">Workbook-provided observations blended with live commentary from the current filtered view.</div>
+                    <div class="pmq-panel-title">Signals & Insights</div>
+                    <div class="pmq-panel-subtitle">Selection-aware observations for the current view, with published workbook commentary shown only on the overall snapshot.</div>
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
-            if not insights_df.empty:
+            if using_published_snapshot and not insights_df.empty:
                 for _, row in insights_df.iterrows():
                     st.markdown(
                         f"""
@@ -1151,10 +1157,7 @@ def run() -> None:
             unsafe_allow_html=True,
         )
         using_published_candidate_map = (
-            selected_college == "All Colleges"
-            and selected_batch == "All Batches"
-            and selected_quadrant == "All Buckets"
-            and not search_text
+            using_published_snapshot
             and not payload["candidate_map"].empty
         )
         candidate_map_df = payload["candidate_map"].copy() if using_published_candidate_map else _build_metric_candidate_map(filtered_roster)
