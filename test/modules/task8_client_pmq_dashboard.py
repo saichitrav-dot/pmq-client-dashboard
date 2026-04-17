@@ -488,7 +488,7 @@ def run() -> None:
             border: none !important;
             box-shadow: none !important;
             color: #1d4ed8 !important;
-            font-size: 20px !important;
+            font-size: 18px !important;
             font-weight: 700 !important;
             line-height: 1.2 !important;
             padding: 0 !important;
@@ -497,8 +497,8 @@ def run() -> None:
             justify-content: center !important;
             text-decoration: none !important;
             position: relative !important;
-            top: -220px !important;
-            left: calc(100% - 34px) !important;
+            top: -210px !important;
+            left: calc(100% - 28px) !important;
             z-index: 10 !important;
         }
         .st-key-task8_view_Deployable_Candidates button:hover,
@@ -705,7 +705,7 @@ def run() -> None:
                 QUADRANT_DESCRIPTIONS[bucket],
                 QUADRANT_COLORS[bucket],
             )
-            if st.button("↗", key=f"task8_view_{bucket.replace(' ', '_')}", use_container_width=False):
+            if st.button("i", key=f"task8_view_{bucket.replace(' ', '_')}", use_container_width=False):
                 bucket_df = filtered_roster[filtered_roster["Quadrant"].astype(str) == bucket].copy()
                 _show_bucket_dialog(bucket, bucket_df)
 
