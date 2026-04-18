@@ -1,5 +1,6 @@
 import io
 import re
+import subprocess
 import unicodedata
 from pathlib import Path
 
@@ -56,6 +57,8 @@ JECRC_BATCH_COLORS = [
 ]
 
 PUBLISHED_REPORT_PATH = Path(__file__).resolve().parents[1] / "published_reports" / "pmq_client_dashboard.xlsx"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+PUBLISHED_REPORT_REPO_PATH = PUBLISHED_REPORT_PATH.relative_to(REPO_ROOT).as_posix()
 
 
 def normalize_name(value):
@@ -1010,6 +1013,49 @@ def publish_dashboard_report_file(report_bytes: bytes) -> Path:
     PUBLISHED_REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     PUBLISHED_REPORT_PATH.write_bytes(report_bytes)
     return PUBLISHED_REPORT_PATH
+
+
+def run_git_command(args):
+    return subprocess.run(
+        ["git", *args],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def push_published_dashboard_report():
+    if not (REPO_ROOT / ".git").exists():
+        return False, "Git repository was not found for the published dashboard."
+
+    branch_result = run_git_command(["branch", "--show-current"])
+    current_branch = branch_result.stdout.strip() if branch_result.returncode == 0 else ""
+    if not current_branch:
+        return False, "Unable to detect the current Git branch for dashboard publishing."
+
+    diff_result = run_git_command(["diff", "--quiet", "--", PUBLISHED_REPORT_REPO_PATH])
+    if diff_result.returncode not in {0, 1}:
+        return False, (diff_result.stderr or diff_result.stdout or "Unable to inspect workbook changes before push.").strip()
+
+    if diff_result.returncode == 0:
+        push_result = run_git_command(["push", "origin", current_branch])
+        if push_result.returncode != 0:
+            return False, (push_result.stderr or push_result.stdout or "Git push failed.").strip()
+        return True, f"Published dashboard workbook is already current on GitHub branch `{current_branch}`."
+
+    commit_message = "Update published PMQ dashboard workbook"
+    commit_result = run_git_command(["commit", "--only", PUBLISHED_REPORT_REPO_PATH, "-m", commit_message])
+    if commit_result.returncode != 0:
+        return False, (commit_result.stderr or commit_result.stdout or "Git commit failed for the published workbook.").strip()
+
+    push_result = run_git_command(["push", "origin", current_branch])
+    if push_result.returncode != 0:
+        return False, (push_result.stderr or push_result.stdout or "Git push failed for the published workbook.").strip()
+
+    commit_hash_result = run_git_command(["rev-parse", "--short", "HEAD"])
+    commit_hash = commit_hash_result.stdout.strip() if commit_hash_result.returncode == 0 else current_branch
+    return True, f"Published dashboard workbook pushed to GitHub on `{current_branch}` at commit `{commit_hash}`."
 
 
 def build_dashboard_report_bytes(
@@ -2020,5 +2066,11 @@ def run():
     with export_col4:
         if st.button("Publish Client Dashboard", use_container_width=True):
             published_path = publish_dashboard_report_file(dashboard_report_bytes)
-            st.success(f"Published client dashboard workbook to {published_path}")
+            push_ok, push_message = push_published_dashboard_report()
+            if push_ok:
+                st.success(f"Published client dashboard workbook to {published_path}")
+                st.info(push_message)
+            else:
+                st.warning(f"Published client dashboard workbook locally to {published_path}")
+                st.error(push_message)
     st.dataframe(roster_display_df.fillna("N/A"), use_container_width=True, hide_index=True)
