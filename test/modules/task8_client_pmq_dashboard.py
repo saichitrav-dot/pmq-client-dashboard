@@ -2,7 +2,6 @@ from pathlib import Path
 
 import pandas as pd
 import plotly.express as px
-import re
 import streamlit as st
 
 
@@ -68,10 +67,6 @@ def _load_payload(path: Path) -> dict:
         "roster": _load_sheet(path, "executive_roster"),
         "jecrc_batch": _load_sheet(path, "jecrc_batch_performance"),
         "galgotias_batch": _load_sheet(path, "galgotias_batch_performance"),
-        "batch_weekly_performance": _load_sheet(path, "college_batch_weekly_performance"),
-        "track_weekly_performance": _load_sheet(path, "college_track_weekly_performance"),
-        "weekly_signal_counts": _load_sheet(path, "college_weekly_signal_counts"),
-        "batch_weekly_attendance": _load_sheet(path, "college_batch_weekly_attendance"),
     }
 
 
@@ -130,97 +125,6 @@ def _batch_sort_key(batch_name: object) -> tuple[int, str]:
     return (999, text.lower())
 
 
-def _week_sort_key(week_label: object) -> tuple[int, str]:
-    text = str(week_label or "").strip()
-    match = re.search(r"(\d+)", text)
-    if match:
-        return (int(match.group(1)), text.lower())
-    return (999, text.lower())
-
-
-def _college_matches(value: object, keyword: str) -> bool:
-    return keyword.lower() in str(value or "").lower()
-
-
-def _dominant_grade(series: pd.Series) -> str:
-    ordered = (
-        series.astype(str)
-        .where(series.notna(), "")
-        .value_counts()
-        .reindex(GRADE_ORDER, fill_value=0)
-    )
-    if ordered.sum() <= 0:
-        return "N/A"
-    return str(ordered.idxmax())
-
-
-def _add_batch_label(df: pd.DataFrame, selected_college: str) -> pd.DataFrame:
-    result = df.copy()
-    if "Assigned Batch" not in result.columns:
-        return result
-    batch_text = result["Assigned Batch"].fillna("Unknown Batch").astype(str).str.strip()
-    if "College" in result.columns and selected_college == "All Colleges":
-        college_text = result["College"].fillna("").astype(str).str.replace(" University", "", regex=False).str.strip()
-        result["Batch Label"] = college_text + " | " + batch_text
-    else:
-        result["Batch Label"] = batch_text
-    return result
-
-
-def _filter_support_frame(df: pd.DataFrame, selected_college: str, selected_batch: str) -> pd.DataFrame:
-    filtered_df = df.copy()
-    if "College" in filtered_df.columns and selected_college != "All Colleges":
-        filtered_df = filtered_df[filtered_df["College"].astype(str) == selected_college].copy()
-    if "Assigned Batch" in filtered_df.columns and selected_batch != "All Batches":
-        filtered_df = filtered_df[filtered_df["Assigned Batch"].astype(str) == selected_batch].copy()
-    return filtered_df
-
-
-def _build_batch_performance_frame(filtered_roster: pd.DataFrame, selected_college: str) -> pd.DataFrame:
-    if filtered_roster.empty:
-        return pd.DataFrame(
-            columns=[
-                "College",
-                "Assigned Batch",
-                "Batch Label",
-                "Students",
-                "Average Attendance %",
-                "Average Performance Score",
-                "Average Overall Performance Score",
-                "Dominant Performance Grade",
-                "Dominant Overall Grade",
-            ]
-        )
-
-    working = _add_batch_label(filtered_roster, selected_college)
-    summary_df = (
-        working.groupby(["College", "Assigned Batch", "Batch Label"], dropna=False)
-        .agg(
-            Students=("Superset ID", "count"),
-            Average_Attendance=("Attendance %", "mean"),
-            Average_Performance=("Performance Score", "mean"),
-            Average_Overall=("Overall Performance Score", "mean"),
-            Dominant_Performance_Grade=("Performance Grade", _dominant_grade),
-            Dominant_Overall_Grade=("Overall Grade", _dominant_grade),
-        )
-        .reset_index()
-        .rename(
-            columns={
-                "Average_Attendance": "Average Attendance %",
-                "Average_Performance": "Average Performance Score",
-                "Average_Overall": "Average Overall Performance Score",
-                "Dominant_Performance_Grade": "Dominant Performance Grade",
-                "Dominant_Overall_Grade": "Dominant Overall Grade",
-            }
-        )
-    )
-    for column in ["Average Attendance %", "Average Performance Score", "Average Overall Performance Score"]:
-        summary_df[column] = pd.to_numeric(summary_df[column], errors="coerce").round(1)
-    summary_df["__batch_sort"] = summary_df["Assigned Batch"].apply(_batch_sort_key)
-    summary_df = summary_df.sort_values(by=["College", "__batch_sort", "Batch Label"]).drop(columns="__batch_sort").reset_index(drop=True)
-    return summary_df
-
-
 def _build_batch_attendance_frame(
     selected_college: str,
     selected_batch: str,
@@ -229,9 +133,9 @@ def _build_batch_attendance_frame(
     galgotias_batch_df: pd.DataFrame,
 ) -> pd.DataFrame:
     published_df = pd.DataFrame()
-    if _college_matches(selected_college, "JECRC") and not jecrc_batch_df.empty:
+    if selected_college == "JECRC" and not jecrc_batch_df.empty:
         published_df = jecrc_batch_df.copy()
-    elif _college_matches(selected_college, "Galgotias") and not galgotias_batch_df.empty:
+    elif selected_college == "Galgotias" and not galgotias_batch_df.empty:
         published_df = galgotias_batch_df.copy()
 
     required_cols = {"Assigned Batch", "Student Count", "Average Attendance %", "Average Overall Performance Score"}
@@ -584,7 +488,7 @@ def run() -> None:
             border: none !important;
             box-shadow: none !important;
             color: #1d4ed8 !important;
-            font-size: 20px !important;
+            font-size: 18px !important;
             font-weight: 700 !important;
             line-height: 1.2 !important;
             padding: 0 !important;
@@ -593,8 +497,8 @@ def run() -> None:
             justify-content: center !important;
             text-decoration: none !important;
             position: relative !important;
-            top: -220px !important;
-            left: calc(100% - 34px) !important;
+            top: -210px !important;
+            left: calc(100% - 28px) !important;
             z-index: 10 !important;
         }
         .st-key-task8_view_Deployable_Candidates button:hover,
@@ -741,22 +645,6 @@ def run() -> None:
     insights_df = payload["insights"]
     jecrc_batch_df = payload["jecrc_batch"]
     galgotias_batch_df = payload["galgotias_batch"]
-    batch_weekly_performance_df = _coerce_numeric(
-        payload["batch_weekly_performance"],
-        ["Average Score", "Submission Count"],
-    )
-    track_weekly_performance_df = _coerce_numeric(
-        payload["track_weekly_performance"],
-        ["Average Score", "Submission Count"],
-    )
-    weekly_signal_counts_df = _coerce_numeric(
-        payload["weekly_signal_counts"],
-        ["Assessments Done", "Assignments Done", "Trainer Feedback Provided"],
-    )
-    batch_weekly_attendance_df = _coerce_numeric(
-        payload["batch_weekly_attendance"],
-        ["Average Attendance %"],
-    )
     plot_df = _coerce_numeric(payload["plot"], TRACKER_COLUMNS)
     roster_df = _coerce_numeric(payload["roster"], TRACKER_COLUMNS)
 
@@ -780,6 +668,7 @@ def run() -> None:
     with filter_cols[0]:
         selected_college = st.selectbox("College", colleges, key="task8_college_filter")
     scoped_batch_df = roster_df if selected_college == "All Colleges" else roster_df[roster_df["College"].astype(str) == selected_college]
+    batches = ["All Batches"] + sorted(scoped_batch_df["Assigned Batch"].dropna().astype(str).unique().tolist())
     batches = ["All Batches"] + sorted(
         scoped_batch_df["Assigned Batch"].dropna().astype(str).unique().tolist(),
         key=_batch_sort_key,
@@ -816,7 +705,7 @@ def run() -> None:
                 QUADRANT_DESCRIPTIONS[bucket],
                 QUADRANT_COLORS[bucket],
             )
-            if st.button("↗", key=f"task8_view_{bucket.replace(' ', '_')}", use_container_width=False):
+            if st.button("i", key=f"task8_view_{bucket.replace(' ', '_')}", use_container_width=False):
                 bucket_df = filtered_roster[filtered_roster["Quadrant"].astype(str) == bucket].copy()
                 _show_bucket_dialog(bucket, bucket_df)
 
@@ -847,8 +736,8 @@ def run() -> None:
         with col:
             _render_signal_card(title, value, detail)
 
-    overview_tab, batch_tab, trends_tab, signals_tab, candidates_tab = st.tabs(
-        ["Overview", "Batch Performance", "Trajectory & Trends", "Signals & Insights", "Candidate Drilldown"]
+    overview_tab, attendance_tab, signals_tab, candidates_tab = st.tabs(
+        ["Overview", "Batch Attendance", "Signals & Insights", "Candidate Drilldown"]
     )
 
     with overview_tab:
@@ -1030,325 +919,97 @@ def run() -> None:
             with col:
                 _render_signal_card(title, value, detail)
 
-    with batch_tab:
+    with attendance_tab:
         st.markdown(
             """
             <div class="pmq-panel">
-                <div class="pmq-panel-title">Batch-wise Performance & Grade View</div>
-                <div class="pmq-panel-subtitle">A college-aware batch comparison that combines attendance, performance, overall outcome, and the current grade mix.</div>
+                <div class="pmq-panel-title">Batch-wise Attendance Progress</div>
+                <div class="pmq-panel-subtitle">Attendance and performance progress by batch for the current selection.</div>
             </div>
             """,
             unsafe_allow_html=True,
         )
 
-        batch_performance_df = _build_batch_performance_frame(filtered_roster, selected_college)
-        if batch_performance_df.empty:
-            st.info("No batch-level performance data is available for the current selection.")
+        batch_attendance_df = _build_batch_attendance_frame(
+            selected_college,
+            selected_batch,
+            filtered_roster,
+            jecrc_batch_df,
+            galgotias_batch_df,
+        )
+        if batch_attendance_df.empty:
+            st.info("No batch-level attendance data is available for the current selection.")
         else:
-            top_left, top_right = st.columns([1.1, 1])
-            with top_left:
-                score_compare_df = batch_performance_df.melt(
-                    id_vars=["Batch Label"],
-                    value_vars=[
-                        column
-                        for column in [
-                            "Average Attendance %",
-                            "Average Performance Score",
-                            "Average Overall Performance Score",
-                        ]
-                        if column in batch_performance_df.columns
-                    ],
-                    var_name="Metric",
-                    value_name="Average Score",
-                )
-                score_compare_df["Metric"] = score_compare_df["Metric"].replace(
-                    {
-                        "Average Attendance %": "Attendance",
-                        "Average Performance Score": "Performance",
-                        "Average Overall Performance Score": "Overall Performance",
-                    }
-                )
-                fig_batch_scores = px.bar(
-                    score_compare_df,
-                    x="Batch Label",
-                    y="Average Score",
-                    color="Metric",
-                    barmode="group",
-                    text="Average Score",
-                    color_discrete_map={
-                        "Attendance": "#1d4ed8",
-                        "Performance": "#12b981",
-                        "Overall Performance": "#0f172a",
-                    },
-                )
-                fig_batch_scores.update_traces(texttemplate="%{text:.1f}", textposition="outside")
-                fig_batch_scores.update_layout(
-                    height=430,
-                    paper_bgcolor="white",
-                    plot_bgcolor="white",
-                    margin=dict(l=10, r=10, t=10, b=70),
-                    xaxis_title="Batch",
-                    yaxis_title="Average Score",
-                    legend_title="",
-                )
-                fig_batch_scores.update_yaxes(range=[0, 100])
-                st.plotly_chart(fig_batch_scores, use_container_width=True)
+            for col in ["Average Attendance %", "Average Overall Performance", "Average Performance Score"]:
+                if col in batch_attendance_df.columns:
+                    batch_attendance_df[col] = pd.to_numeric(batch_attendance_df[col], errors="coerce").round(1)
+            batch_attendance_df = batch_attendance_df.rename(
+                columns={"Average Overall Performance": "Average Overall Performance Score"}
+            )
+            table_columns = [
+                column
+                for column in [
+                    "Assigned Batch",
+                    "Students",
+                    "Average Attendance %",
+                    "Average Performance Score",
+                    "Average Overall Performance Score",
+                ]
+                if column in batch_attendance_df.columns
+            ]
+            batch_attendance_df = batch_attendance_df[table_columns].copy()
 
-            with top_right:
-                grade_mix_df = _add_batch_label(filtered_roster, selected_college)
-                grade_mix_df = (
-                    grade_mix_df.groupby(["Batch Label", "Overall Grade"], dropna=False)
-                    .size()
-                    .reset_index(name="Students")
-                )
-                grade_mix_df["Overall Grade"] = grade_mix_df["Overall Grade"].astype(str)
-                fig_grade_mix = px.bar(
-                    grade_mix_df,
-                    x="Batch Label",
-                    y="Students",
-                    color="Overall Grade",
-                    barmode="stack",
-                    text="Students",
-                    category_orders={"Overall Grade": GRADE_ORDER},
-                    color_discrete_map={
-                        "A+": "#0f9d58",
-                        "A": "#34d399",
-                        "B": "#d4a017",
-                        "C": "#3b82f6",
-                        "F": "#ef4444",
-                    },
-                )
-                fig_grade_mix.update_layout(
-                    height=430,
-                    paper_bgcolor="white",
-                    plot_bgcolor="white",
-                    margin=dict(l=10, r=10, t=10, b=70),
-                    xaxis_title="Batch",
-                    yaxis_title="Students",
-                    legend_title="Overall Grade",
-                )
-                st.plotly_chart(fig_grade_mix, use_container_width=True)
+            compare_df = batch_attendance_df.melt(
+                id_vars=["Assigned Batch"],
+                value_vars=[
+                    col
+                    for col in ["Average Attendance %", "Average Performance Score"]
+                    if col in batch_attendance_df.columns
+                ],
+                var_name="Metric",
+                value_name="Average Score",
+            )
+            compare_df["Metric"] = compare_df["Metric"].replace(
+                {
+                    "Average Attendance %": "Attendance Progress",
+                    "Average Performance Score": "Performance Progress",
+                }
+            )
+            fig_batch_compare = px.bar(
+                compare_df,
+                x="Assigned Batch",
+                y="Average Score",
+                color="Metric",
+                barmode="group",
+                text="Average Score",
+                color_discrete_map={
+                    "Attendance Progress": "#1d4ed8",
+                    "Performance Progress": "#12b981",
+                },
+            )
+            fig_batch_compare.update_traces(texttemplate="%{text:.1f}", textposition="outside")
+            fig_batch_compare.update_layout(
+                height=460,
+                paper_bgcolor="white",
+                plot_bgcolor="white",
+                margin=dict(l=10, r=10, t=10, b=40),
+                xaxis_title="Batch",
+                yaxis_title="Average Score",
+                legend_title="",
+            )
+            fig_batch_compare.update_yaxes(range=[0, 100])
+            st.plotly_chart(fig_batch_compare, use_container_width=True)
 
             st.markdown(
                 """
                 <div class="pmq-panel" style="margin-top:16px;">
                     <div class="pmq-panel-title">Batch Summary Table</div>
-                    <div class="pmq-panel-subtitle">Batch performance, attendance, and dominant grade view for the current selection.</div>
+                    <div class="pmq-panel-subtitle">Sorted batch view with attendance, performance, and overall outcome in one place.</div>
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
-            display_batch_df = batch_performance_df[
-                [
-                    column
-                    for column in [
-                        "College",
-                        "Assigned Batch",
-                        "Students",
-                        "Average Attendance %",
-                        "Average Performance Score",
-                        "Average Overall Performance Score",
-                        "Dominant Performance Grade",
-                        "Dominant Overall Grade",
-                    ]
-                    if column in batch_performance_df.columns
-                ]
-            ].copy()
-            st.dataframe(display_batch_df, use_container_width=True, hide_index=True)
-
-    with trends_tab:
-        st.markdown(
-            """
-            <div class="pmq-panel">
-                <div class="pmq-panel-title">Trajectory & Week-on-Week Trends</div>
-                <div class="pmq-panel-subtitle">Week-wise attendance, batch performance, track trajectory, and delivery counts for the current college and batch selection.</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-        attendance_trend_df = _filter_support_frame(batch_weekly_attendance_df, selected_college, selected_batch)
-        performance_trend_df = _filter_support_frame(batch_weekly_performance_df, selected_college, selected_batch)
-        track_trend_df = _filter_support_frame(track_weekly_performance_df, selected_college, selected_batch)
-        weekly_count_df = _filter_support_frame(weekly_signal_counts_df, selected_college, selected_batch)
-
-        if attendance_trend_df.empty:
-            fallback_attendance_df = _build_batch_attendance_frame(
-                selected_college,
-                selected_batch,
-                filtered_roster,
-                jecrc_batch_df,
-                galgotias_batch_df,
-            )
-            if not fallback_attendance_df.empty:
-                attendance_trend_df = fallback_attendance_df.rename(columns={"Average Overall Performance": "Average Overall Performance Score"}).copy()
-                attendance_trend_df.insert(0, "College", selected_college if selected_college != "All Colleges" else "Current Selection")
-                attendance_trend_df["Attendance Week"] = "Week 1"
-                attendance_trend_df = attendance_trend_df[
-                    ["College", "Assigned Batch", "Attendance Week", "Average Attendance %"]
-                ]
-
-        if performance_trend_df.empty:
-            fallback_batch_df = _build_batch_performance_frame(filtered_roster, selected_college)
-            if not fallback_batch_df.empty:
-                performance_trend_df = fallback_batch_df.copy()
-                performance_trend_df["Assessment Week"] = "Week 1"
-                performance_trend_df["Average Score"] = performance_trend_df["Average Overall Performance Score"]
-                performance_trend_df["Submission Count"] = performance_trend_df["Students"]
-                performance_trend_df = performance_trend_df[
-                    ["College", "Assigned Batch", "Assessment Week", "Average Score", "Submission Count"]
-                ]
-
-        attendance_trend_df = _add_batch_label(attendance_trend_df, selected_college)
-        performance_trend_df = _add_batch_label(performance_trend_df, selected_college)
-
-        if not attendance_trend_df.empty:
-            week_order = sorted(attendance_trend_df["Attendance Week"].dropna().astype(str).unique().tolist(), key=_week_sort_key)
-            attendance_trend_df["Attendance Week"] = pd.Categorical(
-                attendance_trend_df["Attendance Week"],
-                categories=week_order,
-                ordered=True,
-            )
-        if not performance_trend_df.empty:
-            week_order = sorted(performance_trend_df["Assessment Week"].dropna().astype(str).unique().tolist(), key=_week_sort_key)
-            performance_trend_df["Assessment Week"] = pd.Categorical(
-                performance_trend_df["Assessment Week"],
-                categories=week_order,
-                ordered=True,
-            )
-        if not track_trend_df.empty:
-            week_order = sorted(track_trend_df["Assessment Week"].dropna().astype(str).unique().tolist(), key=_week_sort_key)
-            track_trend_df["Assessment Week"] = pd.Categorical(
-                track_trend_df["Assessment Week"],
-                categories=week_order,
-                ordered=True,
-            )
-        if not weekly_count_df.empty:
-            week_order = sorted(weekly_count_df["Assessment Week"].dropna().astype(str).unique().tolist(), key=_week_sort_key)
-            weekly_count_df["Assessment Week"] = pd.Categorical(
-                weekly_count_df["Assessment Week"],
-                categories=week_order,
-                ordered=True,
-            )
-
-        trend_top_left, trend_top_right = st.columns([1, 1])
-        with trend_top_left:
-            if attendance_trend_df.empty:
-                st.info("Attendance week-on-week data is not available for the current selection.")
-            else:
-                fig_attendance_trend = px.line(
-                    attendance_trend_df.sort_values(by=["Attendance Week", "Batch Label"]),
-                    x="Attendance Week",
-                    y="Average Attendance %",
-                    color="Batch Label",
-                    markers=True,
-                )
-                fig_attendance_trend.update_layout(
-                    height=420,
-                    paper_bgcolor="white",
-                    plot_bgcolor="white",
-                    margin=dict(l=10, r=10, t=10, b=10),
-                    xaxis_title="Week",
-                    yaxis_title="Average Attendance %",
-                    legend_title="Batch",
-                )
-                fig_attendance_trend.update_yaxes(range=[0, 100])
-                st.plotly_chart(fig_attendance_trend, use_container_width=True)
-
-        with trend_top_right:
-            if performance_trend_df.empty:
-                st.info("Batch-wise performance trajectory is not available for the current selection.")
-            else:
-                fig_performance_trend = px.line(
-                    performance_trend_df.sort_values(by=["Assessment Week", "Batch Label"]),
-                    x="Assessment Week",
-                    y="Average Score",
-                    color="Batch Label",
-                    markers=True,
-                )
-                fig_performance_trend.update_layout(
-                    height=420,
-                    paper_bgcolor="white",
-                    plot_bgcolor="white",
-                    margin=dict(l=10, r=10, t=10, b=10),
-                    xaxis_title="Week",
-                    yaxis_title="Average Performance Score",
-                    legend_title="Batch",
-                )
-                fig_performance_trend.update_yaxes(range=[0, 100])
-                st.plotly_chart(fig_performance_trend, use_container_width=True)
-
-        trend_bottom_left, trend_bottom_right = st.columns([1, 1])
-        with trend_bottom_left:
-            if track_trend_df.empty:
-                st.info("Track-wise week-on-week performance is not available for the current selection.")
-            else:
-                track_plot_df = track_trend_df.sort_values(by=["College", "Assessment Week", "Track"]).copy()
-                track_plot_args = {
-                    "data_frame": track_plot_df,
-                    "x": "Assessment Week",
-                    "y": "Average Score",
-                    "color": "Track",
-                    "markers": True,
-                    "hover_data": {"Submission Count": True, "College": True},
-                    "color_discrete_map": {"Assessment": "#1d4ed8", "Assignment": "#12b981"},
-                }
-                if selected_college == "All Colleges" and "College" in track_plot_df.columns:
-                    track_plot_args["facet_col"] = "College"
-                fig_track_trend = px.line(**track_plot_args)
-                fig_track_trend.update_layout(
-                    height=420,
-                    paper_bgcolor="white",
-                    plot_bgcolor="white",
-                    margin=dict(l=10, r=10, t=10, b=10),
-                    xaxis_title="Week",
-                    yaxis_title="Average Score",
-                    legend_title="Track",
-                )
-                fig_track_trend.update_yaxes(range=[0, 100])
-                st.plotly_chart(fig_track_trend, use_container_width=True)
-
-        with trend_bottom_right:
-            if weekly_count_df.empty:
-                st.info("Week-wise assessment, assignment, and trainer feedback counts are not available for the current selection.")
-            else:
-                count_plot_df = weekly_count_df.copy()
-                count_id_vars = ["Assessment Week"]
-                if selected_college == "All Colleges" and "College" in count_plot_df.columns:
-                    count_id_vars.append("College")
-                weekly_count_melt = count_plot_df.melt(
-                    id_vars=count_id_vars,
-                    value_vars=["Assessments Done", "Assignments Done", "Trainer Feedback Provided"],
-                    var_name="Metric",
-                    value_name="Count",
-                )
-                weekly_plot_args = {
-                    "data_frame": weekly_count_melt.sort_values(by=["Assessment Week", "Metric"]),
-                    "x": "Assessment Week",
-                    "y": "Count",
-                    "color": "Metric",
-                    "barmode": "group",
-                    "text": "Count",
-                    "color_discrete_map": {
-                        "Assessments Done": "#1d4ed8",
-                        "Assignments Done": "#12b981",
-                        "Trainer Feedback Provided": "#d4a017",
-                    },
-                }
-                if selected_college == "All Colleges" and "College" in weekly_count_melt.columns:
-                    weekly_plot_args["facet_col"] = "College"
-                fig_weekly_counts = px.bar(**weekly_plot_args)
-                fig_weekly_counts.update_traces(textposition="outside")
-                fig_weekly_counts.update_layout(
-                    height=420,
-                    paper_bgcolor="white",
-                    plot_bgcolor="white",
-                    margin=dict(l=10, r=10, t=10, b=10),
-                    xaxis_title="Week",
-                    yaxis_title="Students / Signals",
-                    legend_title="",
-                )
-                st.plotly_chart(fig_weekly_counts, use_container_width=True)
+            st.dataframe(batch_attendance_df, use_container_width=True, hide_index=True)
 
     with signals_tab:
         left_col, right_col = st.columns([1, 1.1])

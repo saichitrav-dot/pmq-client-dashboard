@@ -8,8 +8,7 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-from openpyxl.chart import BarChart, LineChart, Reference
-from openpyxl.chart.label import DataLabelList
+from openpyxl.chart import BarChart, Reference
 from openpyxl.chart.series import DataPoint
 from openpyxl.chart.shapes import GraphicalProperties
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -24,13 +23,6 @@ QUADRANT_COLORS = {
     "Basic Competency": "#0ea5e9",
     "Critical Intervention": "#ef4444",
 }
-
-QUADRANT_ORDER = [
-    "Deployable Candidates",
-    "Progressing Candidates",
-    "Basic Competency",
-    "Critical Intervention",
-]
 
 QUADRANT_ACTIONS = {
     "Deployable Candidates": "Students in the A or A+ performance band and ready for accelerated deployment conversations.",
@@ -185,24 +177,6 @@ def first_non_empty(series):
     return ""
 
 
-def week_sort_key(value):
-    text = str(value or "").strip()
-    match = re.search(r"(\d+)", text)
-    if match:
-        return (0, int(match.group(1)), text.lower())
-    return (1, 9999, text.lower())
-
-
-def track_sort_key(value):
-    text = str(value or "").strip().lower()
-    if "assessment" in text:
-        return (0, text)
-    if "assignment" in text:
-        return (1, text)
-    normalized = task2_assessment.normalize_evaluation_track(value)
-    return (2, normalized)
-
-
 def build_identity_key(superset_id, candidate_name):
     normalized_id = normalize_superset_id(superset_id)
     if normalized_id:
@@ -262,23 +236,12 @@ def build_combined_eval_frame():
 
 
 def attendance_date_columns(df):
-    date_columns = []
-    blocked_tokens = {
-        "candidate", "name", "college", "cohort", "batch", "status", "attendance",
-        "present", "feedback", "score", "grade", "superset", "technology", "language",
-    }
-    for column in df.columns:
-        text = str(column).strip()
-        lowered = text.lower()
-        if any(token in lowered for token in blocked_tokens):
-            continue
-        if re.match(r"^\d{4}-\d{2}-\d{2}", text) or re.match(r"^\d{1,2}-[a-zA-Z]{3}-\d{2,4}", text):
-            date_columns.append(column)
-            continue
-        parsed = pd.to_datetime(text, errors="coerce", dayfirst=True)
-        if pd.notna(parsed):
-            date_columns.append(column)
-    return date_columns
+    return [
+        column
+        for column in df.columns
+        if re.match(r"^\d{4}-\d{2}-\d{2}", str(column))
+        or re.match(r"^\d{1,2}-[a-zA-Z]{3}-\d{2}", str(column))
+    ]
 
 
 def build_code_frame(eval_results):
@@ -1095,512 +1058,6 @@ def push_published_dashboard_report():
     return True, f"Published dashboard workbook pushed to GitHub on `{current_branch}` at commit `{commit_hash}`."
 
 
-def build_jecrc_weekly_bifurcation_frames(filtered_df, eval_df):
-    empty_batch_weekly = pd.DataFrame(columns=["Assigned Batch", "Assessment Week", "Average Score", "Submission Count"])
-    empty_track_weekly = pd.DataFrame(columns=["Track", "Assessment Week", "Average Score", "Submission Count"])
-    empty_batch_summary = pd.DataFrame(
-        columns=["Assigned Batch", "Assessments Done", "Assignments Done", "Average Trainer Feedback Score", "Average Weekly Assessment Score"]
-    )
-
-    jecrc_df = filtered_df.copy()
-    if "College" in jecrc_df.columns:
-        jecrc_df = jecrc_df[jecrc_df["College"].fillna("").astype(str).str.contains("JECRC", case=False, na=False)].copy()
-    if jecrc_df.empty or eval_df is None or eval_df.empty:
-        return empty_batch_weekly, empty_track_weekly, empty_batch_summary
-
-    jecrc_df["Identity_Key"] = jecrc_df.apply(
-        lambda row: build_identity_key(row.get("Superset ID", ""), row.get("Candidate Name", "")),
-        axis=1,
-    )
-    jecrc_identity_keys = {value for value in jecrc_df["Identity_Key"].tolist() if value}
-    if not jecrc_identity_keys:
-        return empty_batch_weekly, empty_track_weekly, empty_batch_summary
-
-    eval_working = eval_df.copy()
-    eval_working["Superset ID"] = eval_working.get("Superset ID", "").apply(normalize_superset_id) if "Superset ID" in eval_working.columns else ""
-    eval_working["Candidate Name"] = eval_working.get("Candidate Name", "").fillna("").astype(str).str.strip()
-    eval_working["Identity_Key"] = eval_working.apply(
-        lambda row: build_identity_key(row.get("Superset ID", ""), row.get("Candidate Name", "")),
-        axis=1,
-    )
-    eval_working = eval_working[eval_working["Identity_Key"].isin(jecrc_identity_keys)].copy()
-    if eval_working.empty:
-        return empty_batch_weekly, empty_track_weekly, empty_batch_summary
-
-    eval_working["Assigned Batch"] = eval_working.get("Assigned Batch", "Unknown Batch").fillna("Unknown Batch").astype(str).str.strip()
-    eval_working["AssessmentWeek"] = eval_working.get("AssessmentWeek", "").fillna("").astype(str).str.strip()
-    eval_working["EvaluationTrack"] = eval_working.get("EvaluationTrack", "").apply(task2_assessment.normalize_evaluation_track)
-    eval_working["Score"] = pd.to_numeric(eval_working.get("Score", np.nan), errors="coerce")
-    eval_working = eval_working[eval_working["AssessmentWeek"].ne("")].copy()
-    if eval_working.empty:
-        return empty_batch_weekly, empty_track_weekly, empty_batch_summary
-
-    assessment_rows = eval_working[eval_working["EvaluationTrack"].eq(task2_assessment.GITHUB_ASSESSMENT_TRACK)].copy()
-    assignment_rows = eval_working[eval_working["EvaluationTrack"].eq(task2_assessment.GITHUB_ASSIGNMENT_TRACK)].copy()
-
-    if assessment_rows.empty:
-        batch_weekly_df = empty_batch_weekly
-    else:
-        batch_weekly_df = (
-            assessment_rows.groupby(["Assigned Batch", "AssessmentWeek"], dropna=False)
-            .agg(
-                Average_Score=("Score", "mean"),
-                Submission_Count=("Identity_Key", "nunique"),
-            )
-            .reset_index()
-            .rename(
-                columns={
-                    "AssessmentWeek": "Assessment Week",
-                    "Average_Score": "Average Score",
-                    "Submission_Count": "Submission Count",
-                }
-            )
-        )
-        batch_weekly_df["Average Score"] = pd.to_numeric(batch_weekly_df["Average Score"], errors="coerce").round(1)
-        batch_weekly_df["__batch_sort"] = batch_weekly_df["Assigned Batch"].apply(batch_sort_key)
-        batch_weekly_df["__week_sort"] = batch_weekly_df["Assessment Week"].apply(week_sort_key)
-        batch_weekly_df = batch_weekly_df.sort_values(by=["__batch_sort", "__week_sort"]).drop(columns=["__batch_sort", "__week_sort"]).reset_index(drop=True)
-
-    track_weekly_source = eval_working.copy()
-    if track_weekly_source.empty:
-        track_weekly_df = empty_track_weekly
-    else:
-        track_weekly_df = (
-            track_weekly_source.groupby(["EvaluationTrack", "AssessmentWeek"], dropna=False)
-            .agg(
-                Average_Score=("Score", "mean"),
-                Submission_Count=("Identity_Key", "nunique"),
-            )
-            .reset_index()
-            .rename(
-                columns={
-                    "EvaluationTrack": "Track",
-                    "AssessmentWeek": "Assessment Week",
-                    "Average_Score": "Average Score",
-                    "Submission_Count": "Submission Count",
-                }
-            )
-        )
-        track_weekly_df["Average Score"] = pd.to_numeric(track_weekly_df["Average Score"], errors="coerce").round(1)
-        track_weekly_df["Track"] = track_weekly_df["Track"].replace(
-            {
-                task2_assessment.GITHUB_ASSESSMENT_TRACK: "Assessment",
-                task2_assessment.GITHUB_ASSIGNMENT_TRACK: "Assignment",
-            }
-        )
-        track_weekly_df["__track_sort"] = track_weekly_df["Track"].apply(track_sort_key)
-        track_weekly_df["__week_sort"] = track_weekly_df["Assessment Week"].apply(week_sort_key)
-        track_weekly_df = track_weekly_df.sort_values(by=["__track_sort", "__week_sort"]).drop(columns=["__track_sort", "__week_sort"]).reset_index(drop=True)
-
-    trainer_feedback_by_batch = (
-        jecrc_df.groupby("Assigned Batch", dropna=False)
-        .agg(Average_Trainer_Feedback_Score=("Trainer Feedback Score", "mean"))
-        .reset_index()
-    )
-    trainer_feedback_by_batch["Average Trainer Feedback Score"] = pd.to_numeric(
-        trainer_feedback_by_batch["Average_Trainer_Feedback_Score"],
-        errors="coerce",
-    ).round(1)
-
-    assessment_count_by_batch = (
-        assessment_rows.groupby("Assigned Batch", dropna=False)["Identity_Key"].nunique().reset_index(name="Assessments Done")
-        if not assessment_rows.empty
-        else pd.DataFrame(columns=["Assigned Batch", "Assessments Done"])
-    )
-    assignment_count_by_batch = (
-        assignment_rows.groupby("Assigned Batch", dropna=False)["Identity_Key"].nunique().reset_index(name="Assignments Done")
-        if not assignment_rows.empty
-        else pd.DataFrame(columns=["Assigned Batch", "Assignments Done"])
-    )
-    average_weekly_assessment_by_batch = (
-        batch_weekly_df.groupby("Assigned Batch", dropna=False)["Average Score"].mean().reset_index(name="Average Weekly Assessment Score")
-        if not batch_weekly_df.empty
-        else pd.DataFrame(columns=["Assigned Batch", "Average Weekly Assessment Score"])
-    )
-
-    batch_execution_df = jecrc_df[["Assigned Batch"]].drop_duplicates().copy()
-    for frame in [assessment_count_by_batch, assignment_count_by_batch, trainer_feedback_by_batch[["Assigned Batch", "Average Trainer Feedback Score"]], average_weekly_assessment_by_batch]:
-        batch_execution_df = batch_execution_df.merge(frame, on="Assigned Batch", how="left")
-    for numeric_column in ["Assessments Done", "Assignments Done"]:
-        batch_execution_df[numeric_column] = pd.to_numeric(batch_execution_df.get(numeric_column, 0), errors="coerce").fillna(0).astype(int)
-    for numeric_column in ["Average Trainer Feedback Score", "Average Weekly Assessment Score"]:
-        batch_execution_df[numeric_column] = pd.to_numeric(batch_execution_df.get(numeric_column, np.nan), errors="coerce").round(1)
-    batch_execution_df["__sort_key"] = batch_execution_df["Assigned Batch"].apply(batch_sort_key)
-    batch_execution_df = batch_execution_df.sort_values(by="__sort_key").drop(columns="__sort_key").reset_index(drop=True)
-
-    return batch_weekly_df, track_weekly_df, batch_execution_df
-
-
-def build_jecrc_attendance_progress_frame(filtered_df, att_data):
-    empty_df = pd.DataFrame(columns=["Assigned Batch", "Attendance Week", "Average Attendance %"])
-    raw_attendance_df = dataframe_from_session(att_data)
-    if raw_attendance_df.empty:
-        return empty_df
-
-    jecrc_roster_df = filtered_df.copy()
-    if "College" in jecrc_roster_df.columns:
-        jecrc_roster_df = jecrc_roster_df[
-            jecrc_roster_df["College"].fillna("").astype(str).str.contains("JECRC", case=False, na=False)
-        ].copy()
-    if jecrc_roster_df.empty:
-        return empty_df
-
-    attendance_name_col = find_first_column(raw_attendance_df, ["Candidate Name", "Trainee", "Student Name"])
-    if attendance_name_col is None:
-        return empty_df
-
-    attendance_working = add_identity_fields(raw_attendance_df, attendance_name_col, ["Superset ID", "SupersetID", "Student ID", "Candidate ID"])
-    if attendance_working.empty:
-        return empty_df
-
-    attendance_working["Identity_Key"] = attendance_working.apply(
-        lambda row: build_identity_key(row.get("Superset ID", ""), row.get("Candidate Name", "")),
-        axis=1,
-    )
-    jecrc_roster_df["Identity_Key"] = jecrc_roster_df.apply(
-        lambda row: build_identity_key(row.get("Superset ID", ""), row.get("Candidate Name", "")),
-        axis=1,
-    )
-    batch_lookup = jecrc_roster_df[["Identity_Key", "Assigned Batch"]].drop_duplicates()
-    attendance_working = attendance_working.merge(batch_lookup, on="Identity_Key", how="inner")
-    if attendance_working.empty:
-        return empty_df
-
-    date_cols = attendance_date_columns(attendance_working)
-    if not date_cols:
-        return empty_df
-
-    def parse_attendance_date(value):
-        parsed = pd.to_datetime(str(value), errors="coerce", dayfirst=True)
-        return parsed
-
-    dated_columns = [(column, parse_attendance_date(column)) for column in date_cols]
-    valid_dated_columns = [item for item in dated_columns if pd.notna(item[1])]
-    if valid_dated_columns:
-        valid_dated_columns = sorted(valid_dated_columns, key=lambda item: item[1])
-        ordered_date_cols = [item[0] for item in valid_dated_columns]
-        week_lookup = {}
-        distinct_weeks = []
-        for _, parsed_date in valid_dated_columns:
-            week_token = f"{parsed_date.isocalendar().year}-W{int(parsed_date.isocalendar().week):02d}"
-            if week_token not in distinct_weeks:
-                distinct_weeks.append(week_token)
-        friendly_week_map = {token: f"Week {idx + 1}" for idx, token in enumerate(distinct_weeks)}
-        for column_name, parsed_date in valid_dated_columns:
-            week_token = f"{parsed_date.isocalendar().year}-W{int(parsed_date.isocalendar().week):02d}"
-            week_lookup[column_name] = friendly_week_map[week_token]
-    else:
-        ordered_date_cols = list(date_cols)
-        week_lookup = {column_name: f"Week {(idx // 7) + 1}" for idx, column_name in enumerate(ordered_date_cols)}
-
-    presence_frame = attendance_working[ordered_date_cols].astype(str).apply(
-        lambda column: column.str.strip().str.upper().map({"P": 1, "A": 0, "L": 0, "OD": 1})
-    )
-    presence_frame = presence_frame.where(presence_frame.isin([0, 1]))
-    attendance_working = attendance_working.reset_index(drop=True)
-    presence_frame = presence_frame.reset_index(drop=True)
-    attendance_working = pd.concat([attendance_working[["Assigned Batch"]], presence_frame], axis=1)
-
-    records = []
-    for week_label in sorted(set(week_lookup.values()), key=week_sort_key):
-        week_columns = [column_name for column_name, mapped_week in week_lookup.items() if mapped_week == week_label]
-        if not week_columns:
-            continue
-        week_scores = attendance_working.groupby("Assigned Batch", dropna=False)[week_columns].mean().mean(axis=1, skipna=True).mul(100)
-        for assigned_batch, value in week_scores.items():
-            if pd.isna(value):
-                continue
-            records.append(
-                {
-                    "Assigned Batch": assigned_batch,
-                    "Attendance Week": week_label,
-                    "Average Attendance %": round(float(value), 1),
-                }
-            )
-
-    if not records:
-        return empty_df
-
-    result_df = pd.DataFrame(records)
-    result_df["__batch_sort"] = result_df["Assigned Batch"].apply(batch_sort_key)
-    result_df["__week_sort"] = result_df["Attendance Week"].apply(week_sort_key)
-    result_df = result_df.sort_values(by=["__batch_sort", "__week_sort"]).drop(columns=["__batch_sort", "__week_sort"]).reset_index(drop=True)
-    return result_df
-
-
-def build_college_weekly_signal_frames(filtered_df, eval_df, college_pattern, default_college_label):
-    empty_batch_weekly = pd.DataFrame(columns=["College", "Assigned Batch", "Assessment Week", "Average Score", "Submission Count"])
-    empty_track_weekly = pd.DataFrame(columns=["College", "Track", "Assessment Week", "Average Score", "Submission Count"])
-    empty_weekly_counts = pd.DataFrame(
-        columns=["College", "Assessment Week", "Assessments Done", "Assignments Done", "Trainer Feedback Provided"]
-    )
-
-    college_df = filtered_df.copy()
-    if "College" in college_df.columns:
-        college_df = college_df[
-            college_df["College"].fillna("").astype(str).str.contains(college_pattern, case=False, na=False)
-        ].copy()
-    if college_df.empty or eval_df is None or eval_df.empty:
-        return empty_batch_weekly, empty_track_weekly, empty_weekly_counts
-
-    resolved_college = (
-        college_df["College"].dropna().astype(str).iloc[0]
-        if "College" in college_df.columns and not college_df["College"].dropna().empty
-        else default_college_label
-    )
-
-    college_df["Identity_Key"] = college_df.apply(
-        lambda row: build_identity_key(row.get("Superset ID", ""), row.get("Candidate Name", "")),
-        axis=1,
-    )
-    college_identity_keys = {value for value in college_df["Identity_Key"].tolist() if value}
-    if not college_identity_keys:
-        return empty_batch_weekly, empty_track_weekly, empty_weekly_counts
-
-    eval_working = eval_df.copy()
-    eval_working["Superset ID"] = (
-        eval_working.get("Superset ID", "").apply(normalize_superset_id)
-        if "Superset ID" in eval_working.columns
-        else ""
-    )
-    eval_working["Candidate Name"] = eval_working.get("Candidate Name", "").fillna("").astype(str).str.strip()
-    eval_working["Identity_Key"] = eval_working.apply(
-        lambda row: build_identity_key(row.get("Superset ID", ""), row.get("Candidate Name", "")),
-        axis=1,
-    )
-    eval_working = eval_working[eval_working["Identity_Key"].isin(college_identity_keys)].copy()
-    if eval_working.empty:
-        return empty_batch_weekly, empty_track_weekly, empty_weekly_counts
-
-    eval_working["Assigned Batch"] = (
-        eval_working.get("Assigned Batch", "Unknown Batch").fillna("Unknown Batch").astype(str).str.strip()
-    )
-    eval_working["AssessmentWeek"] = eval_working.get("AssessmentWeek", "").fillna("").astype(str).str.strip()
-    eval_working["EvaluationTrack"] = eval_working.get("EvaluationTrack", "").apply(task2_assessment.normalize_evaluation_track)
-    eval_working["Score"] = pd.to_numeric(eval_working.get("Score", np.nan), errors="coerce")
-    eval_working = eval_working[eval_working["AssessmentWeek"].ne("")].copy()
-    if eval_working.empty:
-        return empty_batch_weekly, empty_track_weekly, empty_weekly_counts
-
-    assessment_rows = eval_working[eval_working["EvaluationTrack"].eq(task2_assessment.GITHUB_ASSESSMENT_TRACK)].copy()
-    assignment_rows = eval_working[eval_working["EvaluationTrack"].eq(task2_assessment.GITHUB_ASSIGNMENT_TRACK)].copy()
-
-    if assessment_rows.empty:
-        batch_weekly_df = empty_batch_weekly
-    else:
-        batch_weekly_df = (
-            assessment_rows.groupby(["Assigned Batch", "AssessmentWeek"], dropna=False)
-            .agg(
-                Average_Score=("Score", "mean"),
-                Submission_Count=("Identity_Key", "nunique"),
-            )
-            .reset_index()
-            .rename(
-                columns={
-                    "AssessmentWeek": "Assessment Week",
-                    "Average_Score": "Average Score",
-                    "Submission_Count": "Submission Count",
-                }
-            )
-        )
-        batch_weekly_df["Average Score"] = pd.to_numeric(batch_weekly_df["Average Score"], errors="coerce").round(1)
-        batch_weekly_df.insert(0, "College", resolved_college)
-        batch_weekly_df["__batch_sort"] = batch_weekly_df["Assigned Batch"].apply(batch_sort_key)
-        batch_weekly_df["__week_sort"] = batch_weekly_df["Assessment Week"].apply(week_sort_key)
-        batch_weekly_df = (
-            batch_weekly_df.sort_values(by=["__batch_sort", "__week_sort"])
-            .drop(columns=["__batch_sort", "__week_sort"])
-            .reset_index(drop=True)
-        )
-
-    track_source = eval_working.copy()
-    if track_source.empty:
-        track_weekly_df = empty_track_weekly
-    else:
-        track_weekly_df = (
-            track_source.groupby(["EvaluationTrack", "AssessmentWeek"], dropna=False)
-            .agg(
-                Average_Score=("Score", "mean"),
-                Submission_Count=("Identity_Key", "nunique"),
-            )
-            .reset_index()
-            .rename(
-                columns={
-                    "EvaluationTrack": "Track",
-                    "AssessmentWeek": "Assessment Week",
-                    "Average_Score": "Average Score",
-                    "Submission_Count": "Submission Count",
-                }
-            )
-        )
-        track_weekly_df["Average Score"] = pd.to_numeric(track_weekly_df["Average Score"], errors="coerce").round(1)
-        track_weekly_df["Track"] = track_weekly_df["Track"].replace(
-            {
-                task2_assessment.GITHUB_ASSESSMENT_TRACK: "Assessment",
-                task2_assessment.GITHUB_ASSIGNMENT_TRACK: "Assignment",
-            }
-        )
-        track_weekly_df.insert(0, "College", resolved_college)
-        track_weekly_df["__track_sort"] = track_weekly_df["Track"].apply(track_sort_key)
-        track_weekly_df["__week_sort"] = track_weekly_df["Assessment Week"].apply(week_sort_key)
-        track_weekly_df = (
-            track_weekly_df.sort_values(by=["__track_sort", "__week_sort"])
-            .drop(columns=["__track_sort", "__week_sort"])
-            .reset_index(drop=True)
-        )
-
-    feedback_identity_keys = set(
-        college_df[
-            pd.to_numeric(college_df.get("Trainer Feedback Score", np.nan), errors="coerce").fillna(0).gt(0)
-        ]["Identity_Key"].tolist()
-    )
-    weekly_records = []
-    ordered_weeks = sorted(eval_working["AssessmentWeek"].dropna().astype(str).unique().tolist(), key=week_sort_key)
-    for week_label in ordered_weeks:
-        assessment_count = 0
-        if not assessment_rows.empty:
-            assessment_count = int(
-                assessment_rows[assessment_rows["AssessmentWeek"].eq(week_label)]["Identity_Key"].nunique()
-            )
-        assignment_count = 0
-        if not assignment_rows.empty:
-            assignment_count = int(
-                assignment_rows[assignment_rows["AssessmentWeek"].eq(week_label)]["Identity_Key"].nunique()
-            )
-        week_identity_keys = set(
-            eval_working[eval_working["AssessmentWeek"].eq(week_label)]["Identity_Key"].dropna().astype(str).tolist()
-        )
-        trainer_feedback_count = len(week_identity_keys & feedback_identity_keys)
-        weekly_records.append(
-            {
-                "College": resolved_college,
-                "Assessment Week": week_label,
-                "Assessments Done": assessment_count,
-                "Assignments Done": assignment_count,
-                "Trainer Feedback Provided": trainer_feedback_count,
-            }
-        )
-    weekly_counts_df = pd.DataFrame(weekly_records) if weekly_records else empty_weekly_counts
-
-    return batch_weekly_df, track_weekly_df, weekly_counts_df
-
-
-def build_college_attendance_progress_frame(filtered_df, att_data, college_pattern, default_college_label):
-    empty_df = pd.DataFrame(columns=["College", "Assigned Batch", "Attendance Week", "Average Attendance %"])
-    raw_attendance_df = dataframe_from_session(att_data)
-    if raw_attendance_df.empty:
-        return empty_df
-
-    college_roster_df = filtered_df.copy()
-    if "College" in college_roster_df.columns:
-        college_roster_df = college_roster_df[
-            college_roster_df["College"].fillna("").astype(str).str.contains(college_pattern, case=False, na=False)
-        ].copy()
-    if college_roster_df.empty:
-        return empty_df
-
-    resolved_college = (
-        college_roster_df["College"].dropna().astype(str).iloc[0]
-        if "College" in college_roster_df.columns and not college_roster_df["College"].dropna().empty
-        else default_college_label
-    )
-
-    attendance_name_col = find_first_column(raw_attendance_df, ["Candidate Name", "Trainee", "Student Name"])
-    if attendance_name_col is None:
-        return empty_df
-
-    attendance_working = add_identity_fields(
-        raw_attendance_df,
-        attendance_name_col,
-        ["Superset ID", "SupersetID", "Student ID", "Candidate ID"],
-    )
-    if attendance_working.empty:
-        return empty_df
-
-    attendance_working["Identity_Key"] = attendance_working.apply(
-        lambda row: build_identity_key(row.get("Superset ID", ""), row.get("Candidate Name", "")),
-        axis=1,
-    )
-    college_roster_df["Identity_Key"] = college_roster_df.apply(
-        lambda row: build_identity_key(row.get("Superset ID", ""), row.get("Candidate Name", "")),
-        axis=1,
-    )
-    batch_lookup = college_roster_df[["Identity_Key", "Assigned Batch"]].drop_duplicates()
-    attendance_working = attendance_working.merge(batch_lookup, on="Identity_Key", how="inner")
-    if attendance_working.empty:
-        return empty_df
-
-    date_cols = attendance_date_columns(attendance_working)
-    if not date_cols:
-        return empty_df
-
-    def parse_attendance_date(value):
-        return pd.to_datetime(str(value), errors="coerce", dayfirst=True)
-
-    dated_columns = [(column, parse_attendance_date(column)) for column in date_cols]
-    valid_dated_columns = [item for item in dated_columns if pd.notna(item[1])]
-    if valid_dated_columns:
-        valid_dated_columns = sorted(valid_dated_columns, key=lambda item: item[1])
-        ordered_date_cols = [item[0] for item in valid_dated_columns]
-        distinct_weeks = []
-        week_lookup = {}
-        for _, parsed_date in valid_dated_columns:
-            week_token = f"{parsed_date.isocalendar().year}-W{int(parsed_date.isocalendar().week):02d}"
-            if week_token not in distinct_weeks:
-                distinct_weeks.append(week_token)
-        friendly_week_map = {token: f"Week {idx + 1}" for idx, token in enumerate(distinct_weeks)}
-        for column_name, parsed_date in valid_dated_columns:
-            week_token = f"{parsed_date.isocalendar().year}-W{int(parsed_date.isocalendar().week):02d}"
-            week_lookup[column_name] = friendly_week_map[week_token]
-    else:
-        ordered_date_cols = list(date_cols)
-        week_lookup = {column_name: f"Week {(idx // 7) + 1}" for idx, column_name in enumerate(ordered_date_cols)}
-
-    presence_frame = attendance_working[ordered_date_cols].astype(str).apply(
-        lambda column: column.str.strip().str.upper().map({"P": 1, "A": 0, "L": 0, "OD": 1})
-    )
-    presence_frame = presence_frame.where(presence_frame.isin([0, 1]))
-    attendance_working = attendance_working.reset_index(drop=True)
-    presence_frame = presence_frame.reset_index(drop=True)
-    attendance_working = pd.concat([attendance_working[["Assigned Batch"]], presence_frame], axis=1)
-
-    records = []
-    for week_label in sorted(set(week_lookup.values()), key=week_sort_key):
-        week_columns = [column_name for column_name, mapped_week in week_lookup.items() if mapped_week == week_label]
-        if not week_columns:
-            continue
-        week_scores = (
-            attendance_working.groupby("Assigned Batch", dropna=False)[week_columns]
-            .mean()
-            .mean(axis=1, skipna=True)
-            .mul(100)
-        )
-        for assigned_batch, value in week_scores.items():
-            if pd.isna(value):
-                continue
-            records.append(
-                {
-                    "College": resolved_college,
-                    "Assigned Batch": assigned_batch,
-                    "Attendance Week": week_label,
-                    "Average Attendance %": round(float(value), 1),
-                }
-            )
-
-    if not records:
-        return empty_df
-
-    result_df = pd.DataFrame(records)
-    result_df["__batch_sort"] = result_df["Assigned Batch"].apply(batch_sort_key)
-    result_df["__week_sort"] = result_df["Attendance Week"].apply(week_sort_key)
-    result_df = (
-        result_df.sort_values(by=["__batch_sort", "__week_sort"])
-        .drop(columns=["__batch_sort", "__week_sort"])
-        .reset_index(drop=True)
-    )
-    return result_df
-
-
 def build_dashboard_report_bytes(
     roster_df,
     filtered_df,
@@ -1610,8 +1067,6 @@ def build_dashboard_report_bytes(
     selected_college,
     selected_batch,
     current_quadrant_filter,
-    eval_df,
-    att_data,
 ):
     counts = filtered_df["Quadrant"].value_counts() if "Quadrant" in filtered_df.columns else pd.Series(dtype=int)
     thin_border = Border(
@@ -1718,8 +1173,7 @@ def build_dashboard_report_bytes(
         )
     metric_candidate_map_df = pd.DataFrame(candidate_map_rows)
 
-    working_filtered_df = filtered_df.copy()
-    jecrc_batch_df = working_filtered_df.copy()
+    jecrc_batch_df = filtered_df.copy()
     if "College" in jecrc_batch_df.columns:
         jecrc_batch_df = jecrc_batch_df[
             jecrc_batch_df["College"].fillna("").astype(str).str.contains("JECRC", case=False, na=False)
@@ -1734,28 +1188,6 @@ def build_dashboard_report_bytes(
                 Attendance_Numeric=pd.to_numeric(jecrc_batch_df.get("Attendance %"), errors="coerce"),
                 Overall_Numeric=pd.to_numeric(jecrc_batch_df.get("Overall Performance Score"), errors="coerce"),
             )
-            .groupby(["Assigned_Batch", "Quadrant"], dropna=False)
-            .agg(
-                Student_Count=("Superset ID", "count"),
-                Average_Attendance=("Attendance_Numeric", "mean"),
-                Average_Overall_Performance=("Overall_Numeric", "mean"),
-            )
-            .reset_index()
-            .pivot_table(
-                index="Assigned_Batch",
-                columns="Quadrant",
-                values="Student_Count",
-                aggfunc="sum",
-                fill_value=0,
-            )
-            .reset_index()
-        )
-        base_batch_metrics_df = (
-            jecrc_batch_df.assign(
-                Assigned_Batch=jecrc_batch_df.get("Assigned Batch", "Unknown Batch").fillna("Unknown Batch").astype(str).str.strip(),
-                Attendance_Numeric=pd.to_numeric(jecrc_batch_df.get("Attendance %"), errors="coerce"),
-                Overall_Numeric=pd.to_numeric(jecrc_batch_df.get("Overall Performance Score"), errors="coerce"),
-            )
             .groupby("Assigned_Batch", dropna=False)
             .agg(
                 Student_Count=("Superset ID", "count"),
@@ -1763,47 +1195,21 @@ def build_dashboard_report_bytes(
                 Average_Overall_Performance=("Overall_Numeric", "mean"),
             )
             .reset_index()
+            .rename(columns={"Assigned_Batch": "Assigned Batch", "Student_Count": "Student Count"})
         )
-        jecrc_batch_summary_df = base_batch_metrics_df.merge(
-            jecrc_batch_summary_df,
-            on="Assigned_Batch",
-            how="left",
-        ).rename(columns={"Assigned_Batch": "Assigned Batch", "Student_Count": "Student Count"})
-        for bucket_name in QUADRANT_ORDER:
-            if bucket_name not in jecrc_batch_summary_df.columns:
-                jecrc_batch_summary_df[bucket_name] = 0
-            jecrc_batch_summary_df[bucket_name] = pd.to_numeric(jecrc_batch_summary_df[bucket_name], errors="coerce").fillna(0).astype(int)
-        jecrc_batch_summary_df["Average Attendance %"] = pd.to_numeric(jecrc_batch_summary_df["Average_Attendance"], errors="coerce").round(1)
-        jecrc_batch_summary_df["Average Overall Performance Score"] = pd.to_numeric(jecrc_batch_summary_df["Average_Overall_Performance"], errors="coerce").round(1)
+        jecrc_batch_summary_df["Average Attendance %"] = jecrc_batch_summary_df["Average_Attendance"].round(1)
+        jecrc_batch_summary_df["Average Overall Performance Score"] = jecrc_batch_summary_df["Average_Overall_Performance"].round(1)
         jecrc_batch_summary_df = jecrc_batch_summary_df[
-            [
-                "Assigned Batch",
-                "Student Count",
-                "Average Attendance %",
-                "Average Overall Performance Score",
-                "Deployable Candidates",
-                "Progressing Candidates",
-                "Basic Competency",
-                "Critical Intervention",
-            ]
+            ["Assigned Batch", "Student Count", "Average Attendance %", "Average Overall Performance Score"]
         ]
         jecrc_batch_summary_df["__sort_key"] = jecrc_batch_summary_df["Assigned Batch"].apply(batch_sort_key)
         jecrc_batch_summary_df = jecrc_batch_summary_df.sort_values(by="__sort_key").drop(columns="__sort_key").reset_index(drop=True)
     else:
         jecrc_batch_summary_df = pd.DataFrame(
-            columns=[
-                "Assigned Batch",
-                "Student Count",
-                "Average Attendance %",
-                "Average Overall Performance Score",
-                "Deployable Candidates",
-                "Progressing Candidates",
-                "Basic Competency",
-                "Critical Intervention",
-            ]
+            columns=["Assigned Batch", "Student Count", "Average Attendance %", "Average Overall Performance Score"]
         )
 
-    galgotias_batch_df = working_filtered_df.copy()
+    galgotias_batch_df = filtered_df.copy()
     if "College" in galgotias_batch_df.columns:
         galgotias_batch_df = galgotias_batch_df[
             galgotias_batch_df["College"].fillna("").astype(str).str.contains("Galgotias", case=False, na=False)
@@ -1838,87 +1244,6 @@ def build_dashboard_report_bytes(
         galgotias_batch_summary_df = pd.DataFrame(
             columns=["Assigned Batch", "Student Count", "Average Attendance %", "Average Overall Performance Score"]
         )
-
-    jecrc_batch_weekly_df, jecrc_track_weekly_df, jecrc_execution_summary_df = build_jecrc_weekly_bifurcation_frames(working_filtered_df, eval_df)
-    jecrc_attendance_progress_df = build_jecrc_attendance_progress_frame(working_filtered_df, att_data)
-    if jecrc_attendance_progress_df.empty and not jecrc_batch_summary_df.empty:
-        jecrc_attendance_progress_df = jecrc_batch_summary_df[["Assigned Batch", "Average Attendance %"]].copy()
-        jecrc_attendance_progress_df["Attendance Week"] = "Week 1"
-        jecrc_attendance_progress_df = jecrc_attendance_progress_df[["Assigned Batch", "Attendance Week", "Average Attendance %"]]
-    if jecrc_batch_weekly_df.empty and not jecrc_batch_summary_df.empty:
-        jecrc_batch_weekly_df = jecrc_batch_summary_df[["Assigned Batch", "Average Overall Performance Score"]].copy()
-        jecrc_batch_weekly_df["Assessment Week"] = "Week 1"
-        jecrc_batch_weekly_df["Average Score"] = jecrc_batch_weekly_df["Average Overall Performance Score"]
-        jecrc_batch_weekly_df["Submission Count"] = jecrc_batch_summary_df["Student Count"].astype(int)
-        jecrc_batch_weekly_df = jecrc_batch_weekly_df[["Assigned Batch", "Assessment Week", "Average Score", "Submission Count"]]
-
-    jecrc_dashboard_batch_weekly_df, jecrc_dashboard_track_weekly_df, jecrc_dashboard_weekly_counts_df = (
-        build_college_weekly_signal_frames(working_filtered_df, eval_df, "JECRC", "JECRC")
-    )
-    galgotias_dashboard_batch_weekly_df, galgotias_dashboard_track_weekly_df, galgotias_dashboard_weekly_counts_df = (
-        build_college_weekly_signal_frames(working_filtered_df, eval_df, "Galgotias", "Galgotias University")
-    )
-    jecrc_dashboard_attendance_df = build_college_attendance_progress_frame(working_filtered_df, att_data, "JECRC", "JECRC")
-    galgotias_dashboard_attendance_df = build_college_attendance_progress_frame(
-        working_filtered_df,
-        att_data,
-        "Galgotias",
-        "Galgotias University",
-    )
-
-    if jecrc_dashboard_attendance_df.empty and not jecrc_batch_summary_df.empty:
-        jecrc_dashboard_attendance_df = jecrc_batch_summary_df[["Assigned Batch", "Average Attendance %"]].copy()
-        jecrc_dashboard_attendance_df.insert(0, "College", "JECRC")
-        jecrc_dashboard_attendance_df["Attendance Week"] = "Week 1"
-        jecrc_dashboard_attendance_df = jecrc_dashboard_attendance_df[
-            ["College", "Assigned Batch", "Attendance Week", "Average Attendance %"]
-        ]
-    if galgotias_dashboard_attendance_df.empty and not galgotias_batch_summary_df.empty:
-        galgotias_dashboard_attendance_df = galgotias_batch_summary_df[["Assigned Batch", "Average Attendance %"]].copy()
-        galgotias_dashboard_attendance_df.insert(0, "College", "Galgotias University")
-        galgotias_dashboard_attendance_df["Attendance Week"] = "Week 1"
-        galgotias_dashboard_attendance_df = galgotias_dashboard_attendance_df[
-            ["College", "Assigned Batch", "Attendance Week", "Average Attendance %"]
-        ]
-    if jecrc_dashboard_batch_weekly_df.empty and not jecrc_batch_summary_df.empty:
-        jecrc_dashboard_batch_weekly_df = jecrc_batch_summary_df[["Assigned Batch", "Average Overall Performance Score", "Student Count"]].copy()
-        jecrc_dashboard_batch_weekly_df.insert(0, "College", "JECRC")
-        jecrc_dashboard_batch_weekly_df["Assessment Week"] = "Week 1"
-        jecrc_dashboard_batch_weekly_df["Average Score"] = jecrc_dashboard_batch_weekly_df["Average Overall Performance Score"]
-        jecrc_dashboard_batch_weekly_df["Submission Count"] = jecrc_dashboard_batch_weekly_df["Student Count"].astype(int)
-        jecrc_dashboard_batch_weekly_df = jecrc_dashboard_batch_weekly_df[
-            ["College", "Assigned Batch", "Assessment Week", "Average Score", "Submission Count"]
-        ]
-    if galgotias_dashboard_batch_weekly_df.empty and not galgotias_batch_summary_df.empty:
-        galgotias_dashboard_batch_weekly_df = galgotias_batch_summary_df[
-            ["Assigned Batch", "Average Overall Performance Score", "Student Count"]
-        ].copy()
-        galgotias_dashboard_batch_weekly_df.insert(0, "College", "Galgotias University")
-        galgotias_dashboard_batch_weekly_df["Assessment Week"] = "Week 1"
-        galgotias_dashboard_batch_weekly_df["Average Score"] = galgotias_dashboard_batch_weekly_df[
-            "Average Overall Performance Score"
-        ]
-        galgotias_dashboard_batch_weekly_df["Submission Count"] = galgotias_dashboard_batch_weekly_df["Student Count"].astype(int)
-        galgotias_dashboard_batch_weekly_df = galgotias_dashboard_batch_weekly_df[
-            ["College", "Assigned Batch", "Assessment Week", "Average Score", "Submission Count"]
-        ]
-
-    dashboard_batch_weekly_df = pd.concat(
-        [jecrc_dashboard_batch_weekly_df, galgotias_dashboard_batch_weekly_df],
-        ignore_index=True,
-    )
-    dashboard_track_weekly_df = pd.concat(
-        [jecrc_dashboard_track_weekly_df, galgotias_dashboard_track_weekly_df],
-        ignore_index=True,
-    )
-    dashboard_weekly_counts_df = pd.concat(
-        [jecrc_dashboard_weekly_counts_df, galgotias_dashboard_weekly_counts_df],
-        ignore_index=True,
-    )
-    dashboard_attendance_progress_df = pd.concat(
-        [jecrc_dashboard_attendance_df, galgotias_dashboard_attendance_df],
-        ignore_index=True,
-    )
 
     def apply_table_format(worksheet):
         worksheet.freeze_panes = "A2"
@@ -2166,10 +1491,6 @@ def build_dashboard_report_bytes(
         roster_df.to_excel(writer, index=False, sheet_name="executive_roster")
         jecrc_batch_summary_df.to_excel(writer, index=False, sheet_name="jecrc_batch_performance")
         galgotias_batch_summary_df.to_excel(writer, index=False, sheet_name="galgotias_batch_performance")
-        dashboard_batch_weekly_df.to_excel(writer, index=False, sheet_name="college_batch_weekly_performance")
-        dashboard_track_weekly_df.to_excel(writer, index=False, sheet_name="college_track_weekly_performance")
-        dashboard_weekly_counts_df.to_excel(writer, index=False, sheet_name="college_weekly_signal_counts")
-        dashboard_attendance_progress_df.to_excel(writer, index=False, sheet_name="college_batch_weekly_attendance")
 
         workbook["dashboard_summary"].sheet_properties.tabColor = "1D4ED8"
         workbook["summary_data"].sheet_properties.tabColor = "2563EB"
@@ -2181,10 +1502,6 @@ def build_dashboard_report_bytes(
         workbook["executive_roster"].sheet_properties.tabColor = "0F172A"
         workbook["jecrc_batch_performance"].sheet_properties.tabColor = "DC2626"
         workbook["galgotias_batch_performance"].sheet_properties.tabColor = "2563EB"
-        workbook["college_batch_weekly_performance"].sheet_properties.tabColor = "0EA5E9"
-        workbook["college_track_weekly_performance"].sheet_properties.tabColor = "7C3AED"
-        workbook["college_weekly_signal_counts"].sheet_properties.tabColor = "F59E0B"
-        workbook["college_batch_weekly_attendance"].sheet_properties.tabColor = "10B981"
 
         for sheet_name in [
             "summary_data",
@@ -2196,10 +1513,6 @@ def build_dashboard_report_bytes(
             "executive_roster",
             "jecrc_batch_performance",
             "galgotias_batch_performance",
-            "college_batch_weekly_performance",
-            "college_track_weekly_performance",
-            "college_weekly_signal_counts",
-            "college_batch_weekly_attendance",
         ]:
             apply_table_format(workbook[sheet_name])
 
@@ -2207,135 +1520,56 @@ def build_dashboard_report_bytes(
         batch_sheet.sheet_view.showGridLines = False
         batch_sheet.freeze_panes = "A2"
         if batch_sheet.max_row <= 1:
-            batch_sheet.merge_cells("A3:H5")
+            batch_sheet.merge_cells("A3:D5")
             empty_cell = batch_sheet["A3"]
             empty_cell.value = "No JECRC batch-level data is available in the current PMQ view."
             empty_cell.font = Font(size=12, bold=True, color="475569")
             empty_cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
         else:
+            chart_data_start_row = 2
             chart_data_end_row = batch_sheet.max_row
 
             attendance_chart = BarChart()
             attendance_chart.type = "col"
             attendance_chart.style = 10
             attendance_chart.title = "JECRC Batch-wise Average Attendance %"
-            attendance_chart.y_axis.title = "Average Attendance Percentage"
-            attendance_chart.x_axis.title = "Batch"
-            attendance_chart.height = 8.5
-            attendance_chart.width = 14
+            attendance_chart.y_axis.title = "Attendance %"
+            attendance_chart.x_axis.title = "JECRC Batches"
+            attendance_chart.height = 7.5
+            attendance_chart.width = 11
             attendance_chart.varyColors = False
             attendance_data = Reference(batch_sheet, min_col=3, min_row=1, max_row=chart_data_end_row)
             attendance_categories = Reference(batch_sheet, min_col=1, min_row=2, max_row=chart_data_end_row)
             attendance_chart.add_data(attendance_data, titles_from_data=True)
             attendance_chart.set_categories(attendance_categories)
-            attendance_chart.legend = None
-            attendance_chart.dLbls = DataLabelList()
-            attendance_chart.dLbls.showVal = True
-            attendance_chart.y_axis.scaling.min = 0
-            attendance_chart.y_axis.scaling.max = 100
             if attendance_chart.ser:
                 attendance_chart.ser[0].dPt = []
                 for idx in range(chart_data_end_row - 1):
                     point = DataPoint(idx=idx)
                     point.graphicalProperties = GraphicalProperties(solidFill=JECRC_BATCH_COLORS[idx % len(JECRC_BATCH_COLORS)])
                     attendance_chart.ser[0].dPt.append(point)
-            batch_sheet.add_chart(attendance_chart, "K2")
+            batch_sheet.add_chart(attendance_chart, "F2")
 
-            bucket_chart = BarChart()
-            bucket_chart.type = "bar"
-            bucket_chart.style = 12
-            bucket_chart.grouping = "stacked"
-            bucket_chart.overlap = 100
-            bucket_chart.title = "JECRC Batch-wise Performance Bucket Mix"
-            bucket_chart.y_axis.title = "Batch"
-            bucket_chart.x_axis.title = "Student Count"
-            bucket_chart.height = 9.5
-            bucket_chart.width = 15
-            bucket_data = Reference(batch_sheet, min_col=5, min_row=1, max_col=8, max_row=chart_data_end_row)
-            bucket_categories = Reference(batch_sheet, min_col=1, min_row=2, max_row=chart_data_end_row)
-            bucket_chart.add_data(bucket_data, titles_from_data=True)
-            bucket_chart.set_categories(bucket_categories)
-            bucket_chart.legend.position = "b"
-            bucket_palette = ["10B981", "7C3AED", "0EA5E9", "EF4444"]
-            for idx, series in enumerate(bucket_chart.ser):
-                series.graphicalProperties = GraphicalProperties(solidFill=bucket_palette[idx % len(bucket_palette)])
-            batch_sheet.add_chart(bucket_chart, "K20")
-
-            if not jecrc_attendance_progress_df.empty:
-                attendance_progress_start_col = 20
-                attendance_progress_start_row = 2
-                attendance_pivot = jecrc_attendance_progress_df.pivot(
-                    index="Attendance Week",
-                    columns="Assigned Batch",
-                    values="Average Attendance %",
-                ).reset_index()
-                for row_offset, row in enumerate([attendance_pivot.columns.tolist()] + attendance_pivot.fillna(0).values.tolist()):
-                    for col_offset, value in enumerate(row):
-                        batch_sheet.cell(row=attendance_progress_start_row + row_offset, column=attendance_progress_start_col + col_offset).value = value
-                attendance_progress_chart = LineChart()
-                attendance_progress_chart.title = "JECRC Week-on-Week Attendance Progress"
-                attendance_progress_chart.y_axis.title = "Average Attendance Percentage"
-                attendance_progress_chart.x_axis.title = "Week"
-                attendance_progress_chart.height = 7.5
-                attendance_progress_chart.width = 14
-                attendance_progress_chart.y_axis.scaling.min = 0
-                attendance_progress_chart.y_axis.scaling.max = 100
-                attendance_progress_data = Reference(
-                    batch_sheet,
-                    min_col=attendance_progress_start_col + 1,
-                    min_row=attendance_progress_start_row,
-                    max_col=attendance_progress_start_col + len(attendance_pivot.columns) - 1,
-                    max_row=attendance_progress_start_row + len(attendance_pivot),
-                )
-                attendance_progress_categories = Reference(
-                    batch_sheet,
-                    min_col=attendance_progress_start_col,
-                    min_row=attendance_progress_start_row + 1,
-                    max_row=attendance_progress_start_row + len(attendance_pivot),
-                )
-                attendance_progress_chart.add_data(attendance_progress_data, titles_from_data=True)
-                attendance_progress_chart.set_categories(attendance_progress_categories)
-                attendance_progress_chart.legend.position = "b"
-                batch_sheet.add_chart(attendance_progress_chart, "K38")
-
-            if not jecrc_batch_weekly_df.empty:
-                performance_progress_start_col = 20
-                performance_progress_start_row = 24
-                performance_pivot = jecrc_batch_weekly_df.pivot(
-                    index="Assessment Week",
-                    columns="Assigned Batch",
-                    values="Average Score",
-                ).reset_index()
-                for row_offset, row in enumerate([performance_pivot.columns.tolist()] + performance_pivot.fillna(0).values.tolist()):
-                    for col_offset, value in enumerate(row):
-                        batch_sheet.cell(row=performance_progress_start_row + row_offset, column=performance_progress_start_col + col_offset).value = value
-                performance_progress_chart = LineChart()
-                performance_progress_chart.title = "JECRC Week-on-Week Performance Progress"
-                performance_progress_chart.y_axis.title = "Average Score"
-                performance_progress_chart.x_axis.title = "Week"
-                performance_progress_chart.height = 7.5
-                performance_progress_chart.width = 14
-                performance_progress_chart.y_axis.scaling.min = 0
-                performance_progress_chart.y_axis.scaling.max = 100
-                performance_progress_data = Reference(
-                    batch_sheet,
-                    min_col=performance_progress_start_col + 1,
-                    min_row=performance_progress_start_row,
-                    max_col=performance_progress_start_col + len(performance_pivot.columns) - 1,
-                    max_row=performance_progress_start_row + len(performance_pivot),
-                )
-                performance_progress_categories = Reference(
-                    batch_sheet,
-                    min_col=performance_progress_start_col,
-                    min_row=performance_progress_start_row + 1,
-                    max_row=performance_progress_start_row + len(performance_pivot),
-                )
-                performance_progress_chart.add_data(performance_progress_data, titles_from_data=True)
-                performance_progress_chart.set_categories(performance_progress_categories)
-                performance_progress_chart.legend.position = "b"
-                batch_sheet.add_chart(performance_progress_chart, "K56")
-            for hidden_col in range(20, 31):
-                batch_sheet.column_dimensions[get_column_letter(hidden_col)].hidden = True
+            overall_chart = BarChart()
+            overall_chart.type = "col"
+            overall_chart.style = 11
+            overall_chart.title = "JECRC Batch-wise Average Overall Performance"
+            overall_chart.y_axis.title = "Overall Performance Score"
+            overall_chart.x_axis.title = "JECRC Batches"
+            overall_chart.height = 7.5
+            overall_chart.width = 11
+            overall_chart.varyColors = False
+            overall_data = Reference(batch_sheet, min_col=4, min_row=1, max_row=chart_data_end_row)
+            overall_categories = Reference(batch_sheet, min_col=1, min_row=2, max_row=chart_data_end_row)
+            overall_chart.add_data(overall_data, titles_from_data=True)
+            overall_chart.set_categories(overall_categories)
+            if overall_chart.ser:
+                overall_chart.ser[0].dPt = []
+                for idx in range(chart_data_end_row - 1):
+                    point = DataPoint(idx=idx)
+                    point.graphicalProperties = GraphicalProperties(solidFill=JECRC_BATCH_COLORS[idx % len(JECRC_BATCH_COLORS)])
+                    overall_chart.ser[0].dPt.append(point)
+            batch_sheet.add_chart(overall_chart, "F18")
 
         galgotias_sheet = workbook["galgotias_batch_performance"]
         galgotias_sheet.sheet_view.showGridLines = False
@@ -2362,8 +1596,6 @@ def build_dashboard_report_bytes(
             attendance_categories = Reference(galgotias_sheet, min_col=1, min_row=2, max_row=chart_data_end_row)
             attendance_chart.add_data(attendance_data, titles_from_data=True)
             attendance_chart.set_categories(attendance_categories)
-            attendance_chart.y_axis.scaling.min = 0
-            attendance_chart.y_axis.scaling.max = 100
             if attendance_chart.ser:
                 attendance_chart.ser[0].dPt = []
                 for idx in range(chart_data_end_row - 1):
@@ -2385,8 +1617,6 @@ def build_dashboard_report_bytes(
             overall_categories = Reference(galgotias_sheet, min_col=1, min_row=2, max_row=chart_data_end_row)
             overall_chart.add_data(overall_data, titles_from_data=True)
             overall_chart.set_categories(overall_categories)
-            overall_chart.y_axis.scaling.min = 0
-            overall_chart.y_axis.scaling.max = 100
             if overall_chart.ser:
                 overall_chart.ser[0].dPt = []
                 for idx in range(chart_data_end_row - 1):
@@ -2807,8 +2037,6 @@ def run():
         selected_college,
         selected_batch,
         current_quadrant_filter,
-        eval_df,
-        att_data,
     )
     export_col1, export_col2, export_col3, export_col4 = st.columns(4)
     with export_col1:
