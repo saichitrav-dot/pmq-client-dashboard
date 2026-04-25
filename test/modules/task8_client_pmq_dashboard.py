@@ -125,6 +125,233 @@ def _batch_sort_key(batch_name: object) -> tuple[int, str]:
     return (999, text.lower())
 
 
+def _normalize_college_name(college_name: object) -> str:
+    text = str(college_name or "").strip()
+    lowered = text.lower()
+    if "jecrc" in lowered:
+        return "JECRC"
+    if "galgotias" in lowered:
+        return "Galgotias"
+    return text or "Unknown"
+
+
+def _is_generic_batch_label(value: object) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return True
+    lowered = text.lower()
+    return lowered.startswith("batch ") and "-" not in text
+
+
+def _resolve_batch_label(row: pd.Series) -> str:
+    assigned = str(row.get("Assigned Batch", "") or "").strip()
+    batch = str(row.get("Batch", "") or "").strip()
+    if assigned and not _is_generic_batch_label(assigned):
+        return assigned
+    if batch:
+        return batch
+    if assigned:
+        return assigned
+    return "Unknown Batch"
+
+
+def _prepare_batch_comparison_base(filtered_roster: pd.DataFrame) -> pd.DataFrame:
+    if filtered_roster.empty:
+        return pd.DataFrame()
+    working = filtered_roster.copy()
+    working["College Group"] = working["College"].apply(_normalize_college_name)
+    for column in [
+        "Assessment GitHub Weeks",
+        "Top Brains Weeks",
+        "Assignment GitHub Weeks",
+        "Trainer Feedback Score",
+        "Performance Score",
+        "Attendance %",
+    ]:
+        if column in working.columns:
+            working[column] = pd.to_numeric(working[column], errors="coerce")
+    week_columns = [col for col in ["Assessment GitHub Weeks", "Top Brains Weeks", "Assignment GitHub Weeks"] if col in working.columns]
+    if week_columns:
+        working["Tracking Weeks"] = working[week_columns].fillna(0).max(axis=1)
+    else:
+        working["Tracking Weeks"] = 0
+    working["Tracking Weeks"] = pd.to_numeric(working["Tracking Weeks"], errors="coerce").fillna(0).astype(int)
+    working["Batch"] = working.apply(_resolve_batch_label, axis=1)
+    working["Batch Sort"] = working["Batch"].apply(_batch_sort_key)
+    return working
+
+
+def _build_batch_bucket_frame(filtered_roster: pd.DataFrame) -> pd.DataFrame:
+    base = _prepare_batch_comparison_base(filtered_roster)
+    if base.empty or "Quadrant" not in base.columns:
+        return pd.DataFrame(columns=["College Group", "Batch", "Quadrant", "Students"])
+    grouped = (
+        base.groupby(["College Group", "Batch", "Quadrant"], dropna=False)
+        .size()
+        .reset_index(name="Students")
+    )
+    grouped["Batch"] = grouped["Batch"].fillna("Unknown Batch").astype(str)
+    grouped["Quadrant"] = pd.Categorical(grouped["Quadrant"], categories=QUADRANT_ORDER, ordered=True)
+    grouped["Bucket Label"] = grouped["Quadrant"].astype(str).map(
+        {
+            "Deployable Candidates": "Deployable Candidates (A / A+)",
+            "Progressing Candidates": "Progressing Candidates (B)",
+            "Basic Competency": "Basic Competency (C)",
+            "Critical Intervention": "Critical Intervention (F)",
+        }
+    )
+    grouped["Batch Sort"] = grouped["Batch"].apply(_batch_sort_key)
+    grouped = grouped.sort_values(by=["College Group", "Batch Sort", "Quadrant"]).drop(columns="Batch Sort")
+    return grouped
+
+
+def _build_weekly_progress_frame(filtered_roster: pd.DataFrame, metric_column: str) -> pd.DataFrame:
+    base = _prepare_batch_comparison_base(filtered_roster)
+    if base.empty or metric_column not in base.columns:
+        return pd.DataFrame(columns=["College Group", "Batch", "Week", "Average Score", "Students"])
+    base = base[pd.to_numeric(base["Tracking Weeks"], errors="coerce").fillna(0) > 0].copy()
+    if base.empty:
+        return pd.DataFrame(columns=["College Group", "Batch", "Week", "Average Score", "Students"])
+    rows = []
+    for (college, batch), group in base.groupby(["College Group", "Batch"], dropna=False):
+        max_week = int(pd.to_numeric(group["Tracking Weeks"], errors="coerce").fillna(0).max() or 0)
+        for week in range(1, max_week + 1):
+            week_slice = group[group["Tracking Weeks"] >= week]
+            if week_slice.empty:
+                continue
+            rows.append(
+                {
+                    "College Group": college,
+                    "Batch": batch,
+                    "Week": f"Week {week}",
+                    "Week Number": week,
+                    "Average Score": round(pd.to_numeric(week_slice[metric_column], errors="coerce").mean(), 1),
+                    "Students": int(len(week_slice)),
+                }
+            )
+    trend_df = pd.DataFrame(rows)
+    if trend_df.empty:
+        return trend_df
+    trend_df["Batch Sort"] = trend_df["Batch"].apply(_batch_sort_key)
+    trend_df = trend_df.sort_values(by=["College Group", "Batch Sort", "Week Number"]).drop(columns="Batch Sort")
+    return trend_df
+
+
+def _build_college_signal_weekly_frame(filtered_roster: pd.DataFrame) -> pd.DataFrame:
+    base = _prepare_batch_comparison_base(filtered_roster)
+    required_metrics = {
+        "Assessment": "Assessment Composite Score",
+        "Assignment": "Assignment GitHub Score",
+        "Trainer Feedback": "Trainer Feedback Score",
+    }
+    available_metrics = {label: column for label, column in required_metrics.items() if column in base.columns}
+    if base.empty or not available_metrics:
+        return pd.DataFrame(columns=["College Group", "Week", "Week Number", "Metric", "Average Score", "Students"])
+    base = base[pd.to_numeric(base["Tracking Weeks"], errors="coerce").fillna(0) > 0].copy()
+    if base.empty:
+        return pd.DataFrame(columns=["College Group", "Week", "Week Number", "Metric", "Average Score", "Students"])
+    rows = []
+    for college, group in base.groupby("College Group", dropna=False):
+        max_week = int(pd.to_numeric(group["Tracking Weeks"], errors="coerce").fillna(0).max() or 0)
+        for week in range(1, max_week + 1):
+            week_slice = group[group["Tracking Weeks"] >= week]
+            if week_slice.empty:
+                continue
+            for label, column in available_metrics.items():
+                rows.append(
+                    {
+                        "College Group": college,
+                        "Week": f"Week {week}",
+                        "Week Number": week,
+                        "Metric": label,
+                        "Average Score": round(pd.to_numeric(week_slice[column], errors="coerce").mean(), 1),
+                        "Students": int(len(week_slice)),
+                    }
+                )
+    return pd.DataFrame(rows)
+
+
+def _build_signal_summary_frame(filtered_roster: pd.DataFrame) -> pd.DataFrame:
+    base = _prepare_batch_comparison_base(filtered_roster)
+    if base.empty:
+        return pd.DataFrame(
+            columns=[
+                "College Group",
+                "Batch",
+                "Assessment Composite Score",
+                "Top Brains Score",
+                "Assignment GitHub Score",
+                "Trainer Feedback Score",
+            ]
+        )
+    grouped = (
+        base.groupby(["College Group", "Batch"], dropna=False)
+        .agg(
+            Assessment_Composite=("Assessment Composite Score", "mean"),
+            Top_Brains=("Top Brains Score", "mean"),
+            Assignment_Score=("Assignment GitHub Score", "mean"),
+            Trainer_Feedback=("Trainer Feedback Score", "mean"),
+        )
+        .reset_index()
+        .rename(
+            columns={
+                "Assessment_Composite": "Assessment Composite Score",
+                "Top_Brains": "Top Brains Score",
+                "Assignment_Score": "Assignment GitHub Score",
+                "Trainer_Feedback": "Trainer Feedback Score",
+                "Batch": "Batch",
+            }
+        )
+    )
+    grouped["Batch Sort"] = grouped["Batch"].apply(_batch_sort_key)
+    grouped = grouped.sort_values(by=["College Group", "Batch Sort"]).drop(columns="Batch Sort")
+    for column in [
+        "Assessment Composite Score",
+        "Top Brains Score",
+        "Assignment GitHub Score",
+        "Trainer Feedback Score",
+    ]:
+        grouped[column] = pd.to_numeric(grouped[column], errors="coerce").round(1)
+    return grouped
+
+
+def _build_college_batch_snapshot_frame(filtered_roster: pd.DataFrame) -> pd.DataFrame:
+    base = _prepare_batch_comparison_base(filtered_roster)
+    if base.empty:
+        return pd.DataFrame(
+            columns=[
+                "College Group",
+                "Batch",
+                "Students",
+                "Average Attendance %",
+                "Average Performance Score",
+                "Average Overall Performance Score",
+            ]
+        )
+    grouped = (
+        base.groupby(["College Group", "Batch"], dropna=False)
+        .agg(
+            Students=("Superset ID", "count"),
+            Average_Attendance=("Attendance %", "mean"),
+            Average_Performance=("Performance Score", "mean"),
+            Average_Overall=("Overall Performance Score", "mean"),
+        )
+        .reset_index()
+        .rename(
+            columns={
+                "Average_Attendance": "Average Attendance %",
+                "Average_Performance": "Average Performance Score",
+                "Average_Overall": "Average Overall Performance Score",
+            }
+        )
+    )
+    grouped["Batch Sort"] = grouped["Batch"].apply(_batch_sort_key)
+    grouped = grouped.sort_values(by=["College Group", "Batch Sort"]).drop(columns="Batch Sort")
+    for column in ["Average Attendance %", "Average Performance Score", "Average Overall Performance Score"]:
+        grouped[column] = pd.to_numeric(grouped[column], errors="coerce").round(1)
+    return grouped
+
+
 def _build_batch_attendance_frame(
     selected_college: str,
     selected_batch: str,
@@ -736,8 +963,8 @@ def run() -> None:
         with col:
             _render_signal_card(title, value, detail)
 
-    overview_tab, attendance_tab, signals_tab, candidates_tab = st.tabs(
-        ["Overview", "Batch Attendance", "Signals & Insights", "Candidate Drilldown"]
+    overview_tab, batch_comparison_tab, attendance_tab, signals_tab, candidates_tab = st.tabs(
+        ["Overview", "Batch Comparison", "Batch Attendance", "Signals & Insights", "Candidate Drilldown"]
     )
 
     with overview_tab:
@@ -800,7 +1027,24 @@ def run() -> None:
                 orientation="h",
                 text="Average Score",
                 color="Signal",
-                color_discrete_sequence=["#123b6d", "#1c64f2", "#12b981", "#d4a017", "#7c3aed", "#0f172a"],
+                category_orders={
+                    "Signal": [
+                        "Assessment Composite",
+                        "Assignment GitHub",
+                        "Attendance",
+                        "Trainer Feedback",
+                        "Performance Score",
+                        "Overall Score",
+                    ]
+                },
+                color_discrete_map={
+                    "Assessment Composite": "#60a5fa",
+                    "Assignment GitHub": "#3b82f6",
+                    "Attendance": "#34d399",
+                    "Trainer Feedback": "#f59e0b",
+                    "Performance Score": "#8b5cf6",
+                    "Overall Score": "#14b8a6",
+                },
             )
             fig_driver.update_traces(texttemplate="%{text:.1f}", textposition="outside")
             fig_driver.update_layout(
@@ -918,6 +1162,254 @@ def run() -> None:
         for col, (title, value, detail) in zip(snapshot_cols, snapshot_cards):
             with col:
                 _render_signal_card(title, value, detail)
+
+    with batch_comparison_tab:
+        st.markdown(
+            """
+            <div class="pmq-panel">
+                <div class="pmq-panel-title">Batch Comparison</div>
+                <div class="pmq-panel-subtitle">Batch-level performance buckets, weekly performance trajectory, attendance trajectory, and signal maturity for the current college selection.</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        batch_bucket_df = _build_batch_bucket_frame(filtered_roster)
+        signal_summary_df = _build_signal_summary_frame(filtered_roster)
+        batch_snapshot_df = _build_college_batch_snapshot_frame(filtered_roster)
+
+        bucket_left, bucket_right = st.columns([1.08, 0.92])
+
+        with bucket_left:
+            st.markdown(
+                """
+                <div class="pmq-panel">
+                    <div class="pmq-panel-title">Batch-wise Performance Buckets</div>
+                    <div class="pmq-panel-subtitle">Deployable, progressing, basic competency, and critical-intervention counts by batch for JECRC and Galgotias.</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            if batch_bucket_df.empty:
+                st.info("No batch-level bucket distribution is available for the current selection.")
+            else:
+                colleges_to_render = batch_bucket_df["College Group"].dropna().astype(str).unique().tolist()
+                chart_cols = st.columns(len(colleges_to_render)) if len(colleges_to_render) > 1 else [st.container()]
+                for render_col, college_name in zip(chart_cols, colleges_to_render):
+                    with render_col:
+                        college_bucket_df = batch_bucket_df[batch_bucket_df["College Group"].astype(str) == college_name].copy()
+                        batch_order = sorted(college_bucket_df["Batch"].astype(str).unique().tolist(), key=_batch_sort_key)
+                        fig_bucket_mix = px.bar(
+                            college_bucket_df,
+                            x="Batch",
+                            y="Students",
+                            color="Bucket Label",
+                            category_orders={
+                                "Batch": batch_order,
+                                "Bucket Label": [
+                                    "Deployable Candidates (A / A+)",
+                                    "Progressing Candidates (B)",
+                                    "Basic Competency (C)",
+                                    "Critical Intervention (F)",
+                                ],
+                            },
+                            color_discrete_map={
+                                "Deployable Candidates (A / A+)": QUADRANT_COLORS["Deployable Candidates"],
+                                "Progressing Candidates (B)": QUADRANT_COLORS["Progressing Candidates"],
+                                "Basic Competency (C)": QUADRANT_COLORS["Basic Competency"],
+                                "Critical Intervention (F)": QUADRANT_COLORS["Critical Intervention"],
+                            },
+                            text="Students",
+                            barmode="stack",
+                        )
+                        fig_bucket_mix.update_traces(texttemplate="%{text}", textposition="inside", cliponaxis=False)
+                        fig_bucket_mix.update_layout(
+                            title=f"{college_name} Batch-wise Performance Buckets",
+                            height=500,
+                            paper_bgcolor="white",
+                            plot_bgcolor="white",
+                            margin=dict(l=10, r=10, t=55, b=70),
+                            xaxis_title="Batch",
+                            yaxis_title="Students",
+                            legend_title="",
+                        )
+                        fig_bucket_mix.update_xaxes(tickangle=-28, automargin=True)
+                        st.plotly_chart(fig_bucket_mix, use_container_width=True)
+
+        with bucket_right:
+            st.markdown(
+                """
+                <div class="pmq-panel">
+                    <div class="pmq-panel-title">Batch Summary</div>
+                    <div class="pmq-panel-subtitle">A cleaner batch-level table with performance-bucket meaning embedded directly in the bucket chart: Deployable = A/A+, Progressing = B, Basic Competency = C, Critical Intervention = F.</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            if signal_summary_df.empty:
+                st.info("No batch-level summary is available for the current selection.")
+            else:
+                summary_table = signal_summary_df.copy()
+                summary_table = summary_table.rename(
+                    columns={
+                        "College Group": "College",
+                        "Assessment Composite Score": "Assessment Composite",
+                        "Top Brains Score": "Top Brains",
+                        "Assignment GitHub Score": "Assignment",
+                        "Trainer Feedback Score": "Trainer Feedback",
+                    }
+                )
+                st.dataframe(summary_table, use_container_width=True, hide_index=True)
+
+        perf_left, perf_right = st.columns(2)
+
+        with perf_left:
+            st.markdown(
+                """
+                <div class="pmq-panel">
+                    <div class="pmq-panel-title">Performance Snapshot by Batch</div>
+                    <div class="pmq-panel-subtitle">A truthful current-state comparison of performance and overall outcome by batch.</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            if batch_snapshot_df.empty:
+                st.info("No batch-level performance snapshot is available for the current selection.")
+            else:
+                colleges_to_render = batch_snapshot_df["College Group"].dropna().astype(str).unique().tolist()
+                perf_cols = st.columns(len(colleges_to_render)) if len(colleges_to_render) > 1 else [st.container()]
+                for render_col, college_name in zip(perf_cols, colleges_to_render):
+                    with render_col:
+                        college_snapshot_df = batch_snapshot_df[batch_snapshot_df["College Group"].astype(str) == college_name].copy()
+                        batch_order = sorted(college_snapshot_df["Batch"].astype(str).unique().tolist(), key=_batch_sort_key)
+                        fig_perf_snapshot = px.bar(
+                            college_snapshot_df,
+                            x="Batch",
+                            y="Average Overall Performance Score",
+                            text="Average Overall Performance Score",
+                            category_orders={"Batch": batch_order},
+                            color="Batch",
+                            color_discrete_sequence=["#60a5fa", "#34d399", "#f59e0b", "#8b5cf6", "#14b8a6", "#a3e635"],
+                        )
+                        fig_perf_snapshot.update_traces(texttemplate="%{text:.1f}", textposition="outside", cliponaxis=False)
+                        fig_perf_snapshot.update_layout(
+                            title=f"{college_name} Batch Performance Snapshot",
+                            height=430,
+                            paper_bgcolor="white",
+                            plot_bgcolor="white",
+                            margin=dict(l=10, r=10, t=55, b=55),
+                            xaxis_title="Batch",
+                            yaxis_title="Average Overall Performance Score",
+                            legend_title="",
+                            showlegend=False,
+                        )
+                        fig_perf_snapshot.update_yaxes(range=[0, 100])
+                        fig_perf_snapshot.update_xaxes(tickangle=-25, automargin=True)
+                        st.plotly_chart(fig_perf_snapshot, use_container_width=True)
+
+        with perf_right:
+            st.markdown(
+                """
+                <div class="pmq-panel">
+                    <div class="pmq-panel-title">Attendance Snapshot by Batch</div>
+                    <div class="pmq-panel-subtitle">A truthful current-state comparison of attendance by batch.</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            if batch_snapshot_df.empty:
+                st.info("No batch-level attendance snapshot is available for the current selection.")
+            else:
+                colleges_to_render = batch_snapshot_df["College Group"].dropna().astype(str).unique().tolist()
+                att_cols = st.columns(len(colleges_to_render)) if len(colleges_to_render) > 1 else [st.container()]
+                for render_col, college_name in zip(att_cols, colleges_to_render):
+                    with render_col:
+                        college_snapshot_df = batch_snapshot_df[batch_snapshot_df["College Group"].astype(str) == college_name].copy()
+                        batch_order = sorted(college_snapshot_df["Batch"].astype(str).unique().tolist(), key=_batch_sort_key)
+                        fig_att_snapshot = px.bar(
+                            college_snapshot_df,
+                            x="Batch",
+                            y="Average Attendance %",
+                            text="Average Attendance %",
+                            category_orders={"Batch": batch_order},
+                            color="Batch",
+                            color_discrete_sequence=["#14b8a6", "#0f766e", "#22c55e", "#06b6d4", "#1d4ed8"],
+                        )
+                        fig_att_snapshot.update_traces(texttemplate="%{text:.1f}", textposition="outside", cliponaxis=False)
+                        fig_att_snapshot.update_layout(
+                            title=f"{college_name} Batch Attendance Snapshot",
+                            height=430,
+                            paper_bgcolor="white",
+                            plot_bgcolor="white",
+                            margin=dict(l=10, r=10, t=55, b=55),
+                            xaxis_title="Batch",
+                            yaxis_title="Average Attendance %",
+                            legend_title="",
+                            showlegend=False,
+                        )
+                        fig_att_snapshot.update_yaxes(range=[0, 100])
+                        fig_att_snapshot.update_xaxes(tickangle=-25, automargin=True)
+                        st.plotly_chart(fig_att_snapshot, use_container_width=True)
+
+        st.markdown(
+            """
+            <div class="pmq-panel">
+                <div class="pmq-panel-title">Signal Support by Batch</div>
+                <div class="pmq-panel-subtitle">Assessment composite, assignment, and trainer feedback shown side by side for each batch.</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        if signal_summary_df.empty:
+            st.info("No signal-support comparison is available for the current selection.")
+        else:
+            colleges_to_render = signal_summary_df["College Group"].dropna().astype(str).unique().tolist()
+            signal_cols = st.columns(len(colleges_to_render)) if len(colleges_to_render) > 1 else [st.container()]
+            for render_col, college_name in zip(signal_cols, colleges_to_render):
+                with render_col:
+                    college_signal_df = signal_summary_df[signal_summary_df["College Group"].astype(str) == college_name].copy()
+                    batch_order = sorted(college_signal_df["Batch"].astype(str).unique().tolist(), key=_batch_sort_key)
+                    support_df = college_signal_df.melt(
+                        id_vars=["Batch"],
+                        value_vars=["Assessment Composite Score", "Assignment GitHub Score", "Trainer Feedback Score"],
+                        var_name="Metric",
+                        value_name="Value",
+                    )
+                    support_df["Metric"] = support_df["Metric"].replace(
+                        {
+                            "Assessment Composite Score": "Assessment Composite",
+                            "Assignment GitHub Score": "Assignment",
+                            "Trainer Feedback Score": "Trainer Feedback",
+                        }
+                    )
+                    fig_signal = px.bar(
+                        support_df,
+                        x="Batch",
+                        y="Value",
+                        color="Metric",
+                        barmode="group",
+                        text="Value",
+                        category_orders={"Batch": batch_order},
+                        color_discrete_map={
+                            "Assessment Composite": "#1d4ed8",
+                            "Assignment": "#f59e0b",
+                            "Trainer Feedback": "#12b981",
+                        },
+                    )
+                    fig_signal.update_traces(texttemplate="%{text:.1f}", textposition="outside", cliponaxis=False)
+                    fig_signal.update_layout(
+                        title=f"{college_name} Batch Signal Support",
+                        height=430,
+                        paper_bgcolor="white",
+                        plot_bgcolor="white",
+                        margin=dict(l=10, r=10, t=55, b=55),
+                        xaxis_title="Batch",
+                        yaxis_title="Average Score",
+                        legend_title="",
+                    )
+                    fig_signal.update_yaxes(range=[0, 100])
+                    fig_signal.update_xaxes(tickangle=-25, automargin=True)
+                    st.plotly_chart(fig_signal, use_container_width=True)
 
     with attendance_tab:
         st.markdown(
