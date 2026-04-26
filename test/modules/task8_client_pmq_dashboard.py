@@ -125,6 +125,25 @@ def _batch_sort_key(batch_name: object) -> tuple[int, str]:
     return (999, text.lower())
 
 
+def _format_batch_attendance_label(batch_name: object) -> str:
+    text = str(batch_name or "").strip()
+    if not text:
+        return "Unknown Batch"
+    if text == "Batch 1":
+        return "Galgotias-Data&AI Batch"
+    if text == "Batch 1 - JAVA Batch":
+        return "JECRC -Batch 1 - JAVA Batch"
+    if text.startswith("Batch 2"):
+        return f"JECRC - {text}"
+    if text.startswith("Batch 3"):
+        return f"JECRC - {text}"
+    if text.startswith("Batch 4"):
+        return f"JECRC - {text}"
+    if text.startswith("Batch 5"):
+        return f"JECRC - {text}"
+    return text
+
+
 def _normalize_college_name(college_name: object) -> str:
     text = str(college_name or "").strip()
     lowered = text.lower()
@@ -1438,6 +1457,12 @@ def run() -> None:
             batch_attendance_df = batch_attendance_df.rename(
                 columns={"Average Overall Performance": "Average Overall Performance Score"}
             )
+            if "Assigned Batch" in batch_attendance_df.columns:
+                batch_attendance_df["Assigned Batch"] = batch_attendance_df["Assigned Batch"].apply(_format_batch_attendance_label)
+                batch_attendance_df = batch_attendance_df.sort_values(
+                    by="Assigned Batch",
+                    key=lambda series: series.apply(_batch_sort_key),
+                ).reset_index(drop=True)
             table_columns = [
                 column
                 for column in [
