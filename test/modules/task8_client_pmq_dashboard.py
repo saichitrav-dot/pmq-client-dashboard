@@ -144,6 +144,19 @@ def _format_batch_attendance_label(batch_name: object) -> str:
     return text
 
 
+def _batch_attendance_sort_key(batch_name: object) -> tuple[int, str]:
+    text = str(batch_name or "").strip()
+    custom_order = {
+        "Galgotias-Data&AI Batch": 0,
+        "JECRC -Batch 1 - JAVA Batch": 1,
+        "JECRC - Batch 2 - Pytest Batch": 2,
+        "JECRC - Batch 3 - Robot Python": 3,
+        "JECRC - Batch 4 - Playwright": 4,
+        "JECRC - Batch 5 - Dotnet": 5,
+    }
+    return (custom_order.get(text, 999), text.lower())
+
+
 def _normalize_college_name(college_name: object) -> str:
     text = str(college_name or "").strip()
     lowered = text.lower()
@@ -1461,7 +1474,7 @@ def run() -> None:
                 batch_attendance_df["Assigned Batch"] = batch_attendance_df["Assigned Batch"].apply(_format_batch_attendance_label)
                 batch_attendance_df = batch_attendance_df.sort_values(
                     by="Assigned Batch",
-                    key=lambda series: series.apply(_batch_sort_key),
+                    key=lambda series: series.apply(_batch_attendance_sort_key),
                 ).reset_index(drop=True)
             table_columns = [
                 column
